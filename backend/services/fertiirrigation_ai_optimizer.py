@@ -2947,6 +2947,8 @@ def get_available_fertilizers_for_user(db, user_id: int, currency: str = "MXN") 
     active_price_ids.update(user_price_liter_map.keys())
 
     allowed_ids = active_price_ids.intersection(active_my_fertilizers)
+    if not allowed_ids:
+        allowed_ids = set(visible_ids)
     
     result = []
     seen_slugs = set()
