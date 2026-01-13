@@ -198,7 +198,7 @@ class FertiIrrigationExcelService:
         headers = ["Nutriente", "Requerimiento (kg/ha)", "Disponible Suelo", "Aporte Agua"]
         if has_acid:
             headers.append("Aporte Ácido")
-        headers += ["Déficit", "Eficiencia (%)", "A Aplicar (kg/ha)"]
+        headers += ["Déficit Real", "Déficit Seguridad", "Déficit Final", "Eficiencia (%)", "A Aplicar (kg/ha)"]
         
         for col, header in enumerate(headers, 1):
             ws.cell(row=1, column=col, value=header)
@@ -222,9 +222,11 @@ class FertiIrrigationExcelService:
             if has_acid:
                 ws.cell(row=row, column=5, value=round(nb.get('acid_contribution_kg_ha', 0), 2))
                 col_offset = 1
-            ws.cell(row=row, column=5 + col_offset, value=round(nb.get('deficit_kg_ha', 0), 2))
-            ws.cell(row=row, column=6 + col_offset, value=round(nb.get('efficiency_factor', 1) * 100, 0))
-            ws.cell(row=row, column=7 + col_offset, value=round(nb.get('fertilizer_needed_kg_ha', 0), 2))
+            ws.cell(row=row, column=5 + col_offset, value=round(nb.get('deficit_real_kg_ha', 0), 2))
+            ws.cell(row=row, column=6 + col_offset, value=round(nb.get('deficit_security_kg_ha', 0), 2))
+            ws.cell(row=row, column=7 + col_offset, value=round(nb.get('deficit_kg_ha', 0), 2))
+            ws.cell(row=row, column=8 + col_offset, value=round(nb.get('efficiency_factor', 1) * 100, 0))
+            ws.cell(row=row, column=9 + col_offset, value=round(nb.get('fertilizer_needed_kg_ha', 0), 2))
             
             for col in range(1, len(headers) + 1):
                 ws.cell(row=row, column=col).border = self.border
@@ -239,8 +241,9 @@ class FertiIrrigationExcelService:
             chart.title = "Balance Nutricional Completo"
             chart.y_axis.title = "kg/ha"
             chart.x_axis.title = "Nutriente"
-            
-            data = Reference(ws, min_col=2, max_col=5, min_row=1, max_row=row-1)
+
+            max_col = 8 if has_acid else 7
+            data = Reference(ws, min_col=2, max_col=max_col, min_row=1, max_row=row-1)
             cats = Reference(ws, min_col=1, min_row=2, max_row=row-1)
             chart.add_data(data, titles_from_data=True)
             chart.set_categories(cats)

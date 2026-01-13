@@ -469,7 +469,8 @@ class FertiIrrigationCalculator:
         Calculate nutrient requirements for a specific growth stage.
         
         Uses extraction curves to determine what percentage of total
-        requirements should be applied during this stage.
+        requirements should be applied during this stage (delta between
+        the current and previous cumulative percentages).
         
         Returns dict with adjusted nutrient requirements in kg/ha for this stage.
         """
@@ -614,10 +615,11 @@ class FertiIrrigationCalculator:
         }
     
     def calculate_adjusted_soil_availability(
-        self, 
-        soil: SoilData, 
+        self,
+        soil: SoilData,
         stage_extraction_pct: Optional[float] = None,
-        crop_name: Optional[str] = None
+        crop_name: Optional[str] = None,
+        stage_extraction_pct_by_nutrient: Optional[Dict[str, float]] = None
     ) -> Dict[str, float]:
         """
         Calculate soil nutrient availability with base extraction, pH, OM, and CIC adjustments.
@@ -631,9 +633,10 @@ class FertiIrrigationCalculator:
             soil: Soil data with nutrient concentrations
             stage_extraction_pct: Percentage of total crop extraction for current stage (0-100).
                                   If provided, soil availability is proportioned to this stage.
-                                  E.g., if stage uses 20% of crop's nutrients, only 20% of 
+                                  E.g., if stage uses 20% of crop's nutrients, only 20% of
                                   soil availability is credited to this stage.
             crop_name: Optional crop name for crop-specific availability factors
+            stage_extraction_pct_by_nutrient: Optional per-nutrient stage extraction percentages.
         """
         base_availability = self.calculate_soil_availability(soil)
         
@@ -646,14 +649,20 @@ class FertiIrrigationCalculator:
         stage_factor = 1.0
         if stage_extraction_pct is not None and stage_extraction_pct > 0:
             stage_factor = min(1.0, stage_extraction_pct / 100.0)
+
+        def get_stage_factor(nutrient_key: str) -> float:
+            if stage_extraction_pct_by_nutrient and nutrient_key in stage_extraction_pct_by_nutrient:
+                pct = stage_extraction_pct_by_nutrient.get(nutrient_key, 0) or 0
+                return min(1.0, max(0.0, pct / 100.0))
+            return stage_factor
         
         adjusted = {
-            "N": (base_availability["N"] * base_factors.get("N", 0.5) * ph_factors.get("N", 1.0) + om_n_release) * stage_factor,
-            "P2O5": base_availability["P2O5"] * base_factors.get("P", 0.2) * ph_factors.get("P", 1.0) * stage_factor,
-            "K2O": base_availability["K2O"] * base_factors.get("K", 0.4) * ph_factors.get("K", 1.0) * cic_factors.get("K", 1.0) * stage_factor,
-            "Ca": base_availability["Ca"] * base_factors.get("Ca", 0.15) * ph_factors.get("Ca", 1.0) * cic_factors.get("Ca", 1.0) * stage_factor,
-            "Mg": base_availability["Mg"] * base_factors.get("Mg", 0.25) * ph_factors.get("Mg", 1.0) * cic_factors.get("Mg", 1.0) * stage_factor,
-            "S": base_availability["S"] * base_factors.get("S", 0.4) * ph_factors.get("S", 1.0) * stage_factor,
+            "N": (base_availability["N"] * base_factors.get("N", 0.5) * ph_factors.get("N", 1.0) + om_n_release) * get_stage_factor("N"),
+            "P2O5": base_availability["P2O5"] * base_factors.get("P", 0.2) * ph_factors.get("P", 1.0) * get_stage_factor("P2O5"),
+            "K2O": base_availability["K2O"] * base_factors.get("K", 0.4) * ph_factors.get("K", 1.0) * cic_factors.get("K", 1.0) * get_stage_factor("K2O"),
+            "Ca": base_availability["Ca"] * base_factors.get("Ca", 0.15) * ph_factors.get("Ca", 1.0) * cic_factors.get("Ca", 1.0) * get_stage_factor("Ca"),
+            "Mg": base_availability["Mg"] * base_factors.get("Mg", 0.25) * ph_factors.get("Mg", 1.0) * cic_factors.get("Mg", 1.0) * get_stage_factor("Mg"),
+            "S": base_availability["S"] * base_factors.get("S", 0.4) * ph_factors.get("S", 1.0) * get_stage_factor("S"),
         }
         
         return {k: max(0, v) for k, v in adjusted.items()}
@@ -853,13 +862,15 @@ class FertiIrrigationCalculator:
         crop_name = getattr(crop, 'name', None)
         
         # Calculate full soil availability (100% of cycle) for depletion tracking
-        full_soil_avail = self.calculate_adjusted_soil_availability(soil, stage_extraction_pct=100, crop_name=crop_name)
-        
-        # Calculate stage-proportioned soil availability
-        soil_avail = self.calculate_adjusted_soil_availability(soil, stage_extraction_pct=stage_extraction_pct, crop_name=crop_name)
+        full_soil_avail = self.calculate_adjusted_soil_availability(
+            soil,
+            stage_extraction_pct=100,
+            crop_name=crop_name
+        )
         water_contrib = self.calculate_water_contribution(water, irrigation)
         acid_contrib = self.calculate_acid_contribution(acid, irrigation)
         
+        stage_pct_by_nutrient = None
         if crop.custom_extraction_percent:
             pct = crop.custom_extraction_percent
             requirements = {
@@ -870,7 +881,21 @@ class FertiIrrigationCalculator:
                 "Mg": (crop.mg_kg_ha or 0) * pct.get("Mg", 100) / 100,
                 "S": (crop.s_kg_ha or 0) * pct.get("S", 100) / 100,
             }
+            stage_pct_by_nutrient = pct
         elif crop.extraction_crop_id and crop.extraction_stage_id:
+            current_curve = self.get_extraction_curve(crop.extraction_crop_id, crop.extraction_stage_id)
+            if crop.previous_stage_id:
+                prev_curve = self.get_extraction_curve(crop.extraction_crop_id, crop.previous_stage_id)
+            else:
+                prev_curve = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
+            stage_pct_by_nutrient = {
+                "N": current_curve.get("N", 0) - prev_curve.get("N", 0),
+                "P2O5": current_curve.get("P2O5", 0) - prev_curve.get("P2O5", 0),
+                "K2O": current_curve.get("K2O", 0) - prev_curve.get("K2O", 0),
+                "Ca": current_curve.get("Ca", 0) - prev_curve.get("Ca", 0),
+                "Mg": current_curve.get("Mg", 0) - prev_curve.get("Mg", 0),
+                "S": current_curve.get("S", 0) - prev_curve.get("S", 0),
+            }
             stage_requirements = self.calculate_stage_requirements(
                 crop, 
                 crop.extraction_crop_id, 
@@ -894,15 +919,23 @@ class FertiIrrigationCalculator:
                 "Mg": crop.mg_kg_ha or 0,
                 "S": crop.s_kg_ha or 0,
             }
-        
+
+        # Calculate stage-proportioned soil availability
+        soil_avail = self.calculate_adjusted_soil_availability(
+            soil,
+            stage_extraction_pct=stage_extraction_pct,
+            crop_name=crop_name,
+            stage_extraction_pct_by_nutrient=stage_pct_by_nutrient
+        )
         balance = []
         for nutrient, requirement in requirements.items():
             soil_val = soil_avail.get(nutrient, 0)
             water_val = water_contrib.get(nutrient, 0)
             acid_val = acid_contrib.get(nutrient, 0)
             
-            deficit = requirement - soil_val - water_val - acid_val
-            deficit = max(0, deficit)
+            deficit_real = requirement - soil_val - water_val - acid_val
+            deficit_real = max(0, deficit_real)
+            deficit = deficit_real
             
             minimum_applied = False
             minimum_reason = None
@@ -913,11 +946,13 @@ class FertiIrrigationCalculator:
             stage_id = getattr(crop, 'extraction_stage_id', None)
             crop_minimums = get_crop_minimums(crop_id, stage_id)
             
+            agronomic_minimum = 0.0
             if requirement > 0:
                 min_pct = crop_minimums.get(nutrient)
                 
                 if min_pct is not None and min_pct > 0:
                     min_dose = requirement * min_pct
+                    agronomic_minimum = min_dose
                     
                     if deficit < min_dose:
                         deficit = min_dose
@@ -950,6 +985,8 @@ class FertiIrrigationCalculator:
                 "soil_diagnostic_kg_ha": round(soil_val, 2),
                 "water_contribution_kg_ha": round(water_val, 2),
                 "acid_contribution_kg_ha": round(acid_val, 2),
+                "deficit_real_kg_ha": round(deficit_real, 2),
+                "deficit_security_kg_ha": round(agronomic_minimum, 2),
                 "deficit_kg_ha": round(deficit, 2),
                 "efficiency_factor": round(efficiency, 2),
                 "fertilizer_needed_kg_ha": round(fertilizer_needed, 2),

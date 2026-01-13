@@ -345,6 +345,9 @@ class NutrientContributionsRequest(BaseModel):
     acid_treatment: Optional[AcidContributionData] = None  # Acid contribution data
     extraction_crop_id: Optional[str] = None  # Crop ID for agronomic minimums (e.g., 'tomato', 'maize')
     extraction_stage_id: Optional[str] = None  # Stage ID for stage-specific minimums (e.g., 'seedling', 'flowering')
+    previous_stage_id: Optional[str] = None  # Previous stage ID for DELTA extraction calculation
+    custom_extraction_percent: Optional[Dict[str, float]] = None  # Custom stage extraction percentages
+    crop_name: Optional[str] = None  # Optional crop name for soil factors
 
 
 class EfficiencyDetail(BaseModel):
@@ -421,13 +424,51 @@ async def calculate_nutrient_contributions(
             WaterAnalysis.user_id == current_user.id
         ).first()
     
+    crop_name_for_factors = request.crop_name
+    stage_pct_by_nutrient = None
+    if request.custom_extraction_percent:
+        stage_pct_by_nutrient = request.custom_extraction_percent
+    elif request.extraction_crop_id and request.extraction_stage_id:
+        current_curve = fertiirrigation_calculator.get_extraction_curve(
+            request.extraction_crop_id,
+            request.extraction_stage_id
+        )
+        if request.previous_stage_id:
+            prev_curve = fertiirrigation_calculator.get_extraction_curve(
+                request.extraction_crop_id,
+                request.previous_stage_id
+            )
+        else:
+            prev_curve = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
+        stage_pct_by_nutrient = {
+            "N": current_curve.get("N", 0) - prev_curve.get("N", 0),
+            "P2O5": current_curve.get("P2O5", 0) - prev_curve.get("P2O5", 0),
+            "K2O": current_curve.get("K2O", 0) - prev_curve.get("K2O", 0),
+            "Ca": current_curve.get("Ca", 0) - prev_curve.get("Ca", 0),
+            "Mg": current_curve.get("Mg", 0) - prev_curve.get("Mg", 0),
+            "S": current_curve.get("S", 0) - prev_curve.get("S", 0),
+        }
+
+    if stage_pct_by_nutrient:
+        for nutrient_key, pct in stage_pct_by_nutrient.items():
+            if pct < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta negativo para {nutrient_key}."
+                )
+            if pct > 100:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta > 100% para {nutrient_key}."
+                )
+
     if soil_analysis:
         soil_data = soil_model_to_data(soil_analysis)
-        crop_name_for_factors = getattr(request, 'crop_name', None) or getattr(getattr(request, 'crop', None), 'crop_name', None)
         soil_contribution = fertiirrigation_calculator.calculate_adjusted_soil_availability(
-            soil_data, 
+            soil_data,
             stage_extraction_pct=request.stage_extraction_pct,
-            crop_name=crop_name_for_factors
+            crop_name=crop_name_for_factors,
+            stage_extraction_pct_by_nutrient=stage_pct_by_nutrient
         )
         
         bulk_density = soil_analysis.bulk_density or 1.3
@@ -435,7 +476,10 @@ async def calculate_nutrient_contributions(
         ppm_to_g_ha = bulk_density * depth_cm * 0.1 * 1000
         
         stage_factor = 1.0
-        if request.stage_extraction_pct is not None and request.stage_extraction_pct > 0:
+        if stage_pct_by_nutrient:
+            avg_stage = sum(stage_pct_by_nutrient.values()) / len(stage_pct_by_nutrient)
+            stage_factor = min(1.0, max(0.0, avg_stage / 100.0))
+        elif request.stage_extraction_pct is not None and request.stage_extraction_pct > 0:
             stage_factor = min(1.0, request.stage_extraction_pct / 100.0)
         
         micro_soil_contribution = {
@@ -469,7 +513,7 @@ async def calculate_nutrient_contributions(
             "Mo": 0.0
         }
     
-    requirements = {
+    base_requirements = {
         "N": request.requirements.get("n_kg_ha", 0.0),
         "P2O5": request.requirements.get("p2o5_kg_ha", 0.0),
         "K2O": request.requirements.get("k2o_kg_ha", 0.0),
@@ -477,6 +521,33 @@ async def calculate_nutrient_contributions(
         "Mg": request.requirements.get("mg_kg_ha", 0.0),
         "S": request.requirements.get("s_kg_ha", 0.0)
     }
+
+    if request.custom_extraction_percent:
+        requirements = {
+            nutrient: base_requirements.get(nutrient, 0) * (request.custom_extraction_percent.get(nutrient, 0) / 100)
+            for nutrient in base_requirements
+        }
+    elif request.extraction_crop_id and request.extraction_stage_id:
+        crop_data = CropData(
+            name=request.crop_name or "Cultivo",
+            n_kg_ha=base_requirements.get("N", 0),
+            p2o5_kg_ha=base_requirements.get("P2O5", 0),
+            k2o_kg_ha=base_requirements.get("K2O", 0),
+            ca_kg_ha=base_requirements.get("Ca", 0),
+            mg_kg_ha=base_requirements.get("Mg", 0),
+            s_kg_ha=base_requirements.get("S", 0),
+            extraction_crop_id=request.extraction_crop_id,
+            extraction_stage_id=request.extraction_stage_id,
+            previous_stage_id=request.previous_stage_id
+        )
+        requirements = fertiirrigation_calculator.calculate_stage_requirements(
+            crop_data,
+            request.extraction_crop_id,
+            request.extraction_stage_id,
+            previous_stage=request.previous_stage_id
+        )
+    else:
+        requirements = base_requirements
     
     micro_req = request.micro_requirements or MicroRequirements()
     micro_requirements = {
@@ -616,6 +687,7 @@ async def calculate_nutrient_contributions(
         "• Esuelo: Disponibilidad del nutriente desde el suelo (40-85%)\n"
         "• Eagua: Disponibilidad del nutriente desde el agua (50-95%)\n"
         "• Pseguridad: Porcentaje mínimo obligatorio (5-15%)\n\n"
+        "El déficit base representa el déficit fisiológico real.\n"
         "El déficit final SIEMPRE será al menos el mínimo de seguridad,\n"
         "garantizando aporte nutricional incluso cuando suelo y agua\n"
         "cubran el requerimiento teórico."
@@ -632,7 +704,7 @@ async def calculate_nutrient_contributions(
         safety_percentages={k: round(v * 100, 1) for k, v in safety_percentages.items()},
         efficiency_details=efficiency_details,
         technical_note=technical_note,
-        real_deficit=deficit_final,
+        real_deficit=deficit_base,
         agronomic_minimums=deficit_seguridad,
         micro_requirements={k: round(v, 2) for k, v in micro_requirements.items()},
         micro_soil_contribution={k: round(v, 2) for k, v in micro_soil_contribution.items()},
@@ -705,6 +777,39 @@ async def calculate_fertiirrigation(
         previous_stage_id=request.crop.previous_stage_id,
         custom_extraction_percent=request.crop.custom_extraction_percent,
     )
+
+    if crop_data.custom_extraction_percent:
+        for nutrient_key, pct in crop_data.custom_extraction_percent.items():
+            if pct < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta negativo para {nutrient_key}."
+                )
+            if pct > 100:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta > 100% para {nutrient_key}."
+                )
+
+    if crop_data.extraction_crop_id and crop_data.extraction_stage_id:
+        current_curve = fertiirrigation_calculator.get_extraction_curve(
+            crop_data.extraction_crop_id,
+            crop_data.extraction_stage_id
+        )
+        if crop_data.previous_stage_id:
+            prev_curve = fertiirrigation_calculator.get_extraction_curve(
+                crop_data.extraction_crop_id,
+                crop_data.previous_stage_id
+            )
+        else:
+            prev_curve = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
+        for nutrient_key in ["N", "P2O5", "K2O", "Ca", "Mg", "S"]:
+            delta = current_curve.get(nutrient_key, 0) - prev_curve.get(nutrient_key, 0)
+            if delta < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta negativo para {nutrient_key}."
+                )
     
     irrigation_data = IrrigationData(
         system=request.irrigation.irrigation_system or "goteo",
@@ -1159,6 +1264,7 @@ class OptimizeRequest(BaseModel):
     extraction_crop_id: Optional[str] = None  # Crop ID for agronomic minimums (e.g., 'tomato', 'maize')
     extraction_stage_id: Optional[str] = None  # Stage ID for stage-specific minimums (e.g., 'seedling', 'flowering')
     previous_stage_id: Optional[str] = None  # Previous stage ID for DELTA extraction calculation
+    custom_extraction_percent: Optional[Dict[str, float]] = None  # Custom stage extraction percentages
 
 
 class FertilizerDoseResponse(BaseModel):
@@ -1257,12 +1363,82 @@ async def optimize_fertigation(
     Acid nutrient contributions are deducted from deficits before optimization.
     Soil and water contributions are deducted when analysis IDs are provided.
     """
-    n_deficit = request.deficit.get("n_kg_ha", 0)
-    p2o5_deficit = request.deficit.get("p2o5_kg_ha", 0)
-    k2o_deficit = request.deficit.get("k2o_kg_ha", 0)
-    ca_deficit = request.deficit.get("ca_kg_ha", 0)
-    mg_deficit = request.deficit.get("mg_kg_ha", 0)
-    s_deficit = request.deficit.get("s_kg_ha", 0)
+    base_requirements = {
+        "N": request.deficit.get("n_kg_ha", 0),
+        "P2O5": request.deficit.get("p2o5_kg_ha", 0),
+        "K2O": request.deficit.get("k2o_kg_ha", 0),
+        "Ca": request.deficit.get("ca_kg_ha", 0),
+        "Mg": request.deficit.get("mg_kg_ha", 0),
+        "S": request.deficit.get("s_kg_ha", 0),
+    }
+
+    stage_pct_by_nutrient = None
+    if request.custom_extraction_percent:
+        stage_pct_by_nutrient = request.custom_extraction_percent
+        stage_requirements = {
+            nutrient: base_requirements.get(nutrient, 0) * (request.custom_extraction_percent.get(nutrient, 0) / 100)
+            for nutrient in base_requirements
+        }
+    elif request.extraction_crop_id and request.extraction_stage_id:
+        current_curve = fertiirrigation_calculator.get_extraction_curve(
+            request.extraction_crop_id,
+            request.extraction_stage_id
+        )
+        if request.previous_stage_id:
+            prev_curve = fertiirrigation_calculator.get_extraction_curve(
+                request.extraction_crop_id,
+                request.previous_stage_id
+            )
+        else:
+            prev_curve = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
+        stage_pct_by_nutrient = {
+            "N": current_curve.get("N", 0) - prev_curve.get("N", 0),
+            "P2O5": current_curve.get("P2O5", 0) - prev_curve.get("P2O5", 0),
+            "K2O": current_curve.get("K2O", 0) - prev_curve.get("K2O", 0),
+            "Ca": current_curve.get("Ca", 0) - prev_curve.get("Ca", 0),
+            "Mg": current_curve.get("Mg", 0) - prev_curve.get("Mg", 0),
+            "S": current_curve.get("S", 0) - prev_curve.get("S", 0),
+        }
+        crop_data = CropData(
+            name=request.crop_name or "Cultivo",
+            n_kg_ha=base_requirements.get("N", 0),
+            p2o5_kg_ha=base_requirements.get("P2O5", 0),
+            k2o_kg_ha=base_requirements.get("K2O", 0),
+            ca_kg_ha=base_requirements.get("Ca", 0),
+            mg_kg_ha=base_requirements.get("Mg", 0),
+            s_kg_ha=base_requirements.get("S", 0),
+            extraction_crop_id=request.extraction_crop_id,
+            extraction_stage_id=request.extraction_stage_id,
+            previous_stage_id=request.previous_stage_id,
+        )
+        stage_requirements = fertiirrigation_calculator.calculate_stage_requirements(
+            crop_data,
+            request.extraction_crop_id,
+            request.extraction_stage_id,
+            previous_stage=request.previous_stage_id
+        )
+    else:
+        stage_requirements = base_requirements
+
+    if stage_pct_by_nutrient:
+        for nutrient_key, pct in stage_pct_by_nutrient.items():
+            if pct < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta negativo para {nutrient_key}."
+                )
+            if pct > 100:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta > 100% para {nutrient_key}."
+                )
+
+    n_deficit = stage_requirements.get("N", 0)
+    p2o5_deficit = stage_requirements.get("P2O5", 0)
+    k2o_deficit = stage_requirements.get("K2O", 0)
+    ca_deficit = stage_requirements.get("Ca", 0)
+    mg_deficit = stage_requirements.get("Mg", 0)
+    s_deficit = stage_requirements.get("S", 0)
     
     soil_contribution = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
     water_contribution = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
@@ -1278,7 +1454,8 @@ async def optimize_fertigation(
             soil_contribution = fertiirrigation_calculator.calculate_adjusted_soil_availability(
                 soil_data,
                 stage_extraction_pct=request.stage_extraction_pct,
-                crop_name=crop_name_for_factors
+                crop_name=crop_name_for_factors,
+                stage_extraction_pct_by_nutrient=stage_pct_by_nutrient
             )
     
     if request.water_analysis_id:
@@ -1342,12 +1519,12 @@ async def optimize_fertigation(
     crop_minimums = get_crop_minimums(crop_id_for_minimums, stage_for_minimums)
     
     # Original requirements from request (before any deductions)
-    n_requirement = request.deficit.get("n_kg_ha", 0)
-    p2o5_requirement = request.deficit.get("p2o5_kg_ha", 0)
-    k2o_requirement = request.deficit.get("k2o_kg_ha", 0)
-    ca_requirement = request.deficit.get("ca_kg_ha", 0)
-    mg_requirement = request.deficit.get("mg_kg_ha", 0)
-    s_requirement = request.deficit.get("s_kg_ha", 0)
+    n_requirement = stage_requirements.get("N", 0)
+    p2o5_requirement = stage_requirements.get("P2O5", 0)
+    k2o_requirement = stage_requirements.get("K2O", 0)
+    ca_requirement = stage_requirements.get("Ca", 0)
+    mg_requirement = stage_requirements.get("Mg", 0)
+    s_requirement = stage_requirements.get("S", 0)
     
     # Get minimum percentages for all macronutrients
     n_min_pct = crop_minimums.get("N")

@@ -251,6 +251,8 @@ class NutrientBalance(BaseModel):
     soil_available_kg_ha: Optional[float] = 0.0
     water_contribution_kg_ha: float
     acid_contribution_kg_ha: Optional[float] = 0.0
+    deficit_real_kg_ha: Optional[float] = 0.0
+    deficit_security_kg_ha: Optional[float] = 0.0
     deficit_kg_ha: float
     fertilizer_needed_kg_ha: float
     efficiency_factor: float

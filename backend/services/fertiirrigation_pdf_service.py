@@ -1013,7 +1013,7 @@ def create_fertiirrigation_pdf_report(
     
     if acid_has_nutrient_contrib:
         nutrients_data = [
-            ["Nutriente", "Req.\n(kg/ha)", "Aporte\nSuelo", "Aporte\nAgua", "Aporte\nÁcido", "Déficit", "Efic.", "Aplicar\n(kg/ha)"],
+            ["Nutriente", "Req.\n(kg/ha)", "Aporte\nSuelo", "Aporte\nAgua", "Aporte\nÁcido", "Déficit\nReal", "Déficit\nSeg.", "Déficit\nFinal", "Efic.", "Aplicar\n(kg/ha)"],
         ]
         for nb in nutrient_balance:
             nutrients_data.append([
@@ -1022,14 +1022,19 @@ def create_fertiirrigation_pdf_report(
                 f"{nb.get('soil_contribution_kg_ha', 0):.1f}",
                 f"{nb.get('water_contribution_kg_ha', 0):.1f}",
                 f"{nb.get('acid_contribution_kg_ha', 0):.1f}",
+                f"{nb.get('deficit_real_kg_ha', 0):.1f}",
+                f"{nb.get('deficit_security_kg_ha', 0):.1f}",
                 f"{nb.get('deficit_kg_ha', 0):.1f}",
                 f"{nb.get('efficiency_factor', 1)*100:.0f}%",
                 f"{nb.get('fertilizer_needed_kg_ha', 0):.1f}",
             ])
-        nutrients_table = Table(nutrients_data, colWidths=[0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.6*inch, 0.75*inch])
+        nutrients_table = Table(
+            nutrients_data,
+            colWidths=[0.6*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.6*inch, 0.8*inch]
+        )
     else:
         nutrients_data = [
-            ["Nutriente", "Req.\n(kg/ha)", "Aporte\nSuelo", "Aporte\nAgua", "Déficit", "Efic.", "Aplicar\n(kg/ha)"],
+            ["Nutriente", "Req.\n(kg/ha)", "Aporte\nSuelo", "Aporte\nAgua", "Déficit\nReal", "Déficit\nSeg.", "Déficit\nFinal", "Efic.", "Aplicar\n(kg/ha)"],
         ]
         for nb in nutrient_balance:
             nutrients_data.append([
@@ -1037,11 +1042,16 @@ def create_fertiirrigation_pdf_report(
                 f"{nb.get('requirement_kg_ha', 0):.1f}",
                 f"{nb.get('soil_contribution_kg_ha', 0):.1f}",
                 f"{nb.get('water_contribution_kg_ha', 0):.1f}",
+                f"{nb.get('deficit_real_kg_ha', 0):.1f}",
+                f"{nb.get('deficit_security_kg_ha', 0):.1f}",
                 f"{nb.get('deficit_kg_ha', 0):.1f}",
                 f"{nb.get('efficiency_factor', 1)*100:.0f}%",
                 f"{nb.get('fertilizer_needed_kg_ha', 0):.1f}",
             ])
-        nutrients_table = Table(nutrients_data, colWidths=[0.85*inch, 0.85*inch, 0.85*inch, 0.85*inch, 0.85*inch, 0.7*inch, 0.85*inch])
+        nutrients_table = Table(
+            nutrients_data,
+            colWidths=[0.7*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.6*inch, 0.85*inch]
+        )
     nutrients_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), FERTIRRIEGO_COLOR),
         ('TEXTCOLOR', (0, 0), (-1, 0), HexColor("#ffffff")),

@@ -2673,7 +2673,7 @@ def calculate_acid_n_contribution(acid_data: Optional[Dict] = None) -> float:
 def adjust_deficits_for_acid_nitrogen(
     deficits: Dict[str, float],
     acid_data: Optional[Dict] = None
-) -> tuple:
+) -> Dict[str, float]:
     """
     Subtract N contributed by nitric acid from deficits.
     
@@ -2685,7 +2685,7 @@ def adjust_deficits_for_acid_nitrogen(
     Then we calculate N contribution and subtract from deficit.
     
     Returns:
-        tuple: (adjusted_deficits, acid_n_kg_ha)
+        Dict[str, float]: Adjusted deficits after nitric acid N contribution.
     """
     adjusted = deficits.copy()
     n_from_acid_kg = calculate_acid_n_contribution(acid_data)
@@ -2695,7 +2695,7 @@ def adjust_deficits_for_acid_nitrogen(
         adjusted['N'] = max(0, original_n - n_from_acid_kg)
         logger.info(f"[AcidN] HNO3 contributes {n_from_acid_kg:.2f} kg N/ha. Deficit N: {original_n:.1f} -> {adjusted['N']:.1f} kg/ha")
     
-    return adjusted, n_from_acid_kg
+    return adjusted
 
 
 def _optimize_manual_mode(
@@ -3691,6 +3691,18 @@ def _optimize_profile(
         current_coverage = _calculate_coverage(deficits, remaining_deficits)
         if current_coverage.get(scarce_nutrient, 0) >= min_coverage * 100:
             continue
+
+        needs_multi = [
+            n for n in NUTRIENT_PRIORITY
+            if n != scarce_nutrient
+            and deficits.get(n, 0) > 0
+            and current_coverage.get(n, 0) < (min_coverage * 100)
+        ]
+        has_multi_for_target = any(
+            _get_nutrient_content(f, scarce_nutrient) > 0
+            and any(_get_nutrient_content(f, n) > 0 for n in needs_multi)
+            for f in available
+        )
         
         best_carrier = None
         best_score = float('inf')
@@ -3719,6 +3731,13 @@ def _optimize_profile(
             
             price = fert.get('price_per_kg', 25.0) or 25.0
             score = (price * dose) / target_delta
+
+            if needs_multi:
+                provides_other = any(_get_nutrient_content(fert, n) > 0 for n in needs_multi)
+                if has_multi_for_target and not provides_other:
+                    continue
+                if provides_other:
+                    score = score * 0.7
             
             acid_penalty = fert.get('acid_penalty', 1.0)
             acid_boost = fert.get('acid_boost', 1.0)
@@ -4165,7 +4184,7 @@ def optimize_deterministic(
             logger.info(f"[DeterministicOptimizer] Adjusted deficits after acid: {adjusted_deficits}")
     
     if not acid_recommendation and acid_data:
-        adjusted_deficits, _ = adjust_deficits_for_acid_nitrogen(deficits, acid_data)
+        adjusted_deficits = adjust_deficits_for_acid_nitrogen(deficits, acid_data)
     
     result = {}
     

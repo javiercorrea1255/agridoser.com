@@ -611,17 +611,6 @@ export default function FertiIrrigationCalculator() {
       return;
     }
     
-    const getStageAdjustedValue = (field, extractKey) => {
-      const totalValue = parseFloat(formData[field]) || 0;
-      if (stageExtractionPercent && previousStageExtractionPercent && stageExtractionPercent[extractKey] !== undefined) {
-        const currentPercent = stageExtractionPercent[extractKey] || 0;
-        const prevPercent = previousStageExtractionPercent[extractKey] || 0;
-        const deltaPercent = currentPercent - prevPercent;
-        return totalValue * (deltaPercent / 100);
-      }
-      return totalValue;
-    };
-    
     let microDeltaPercent = 100;
     if (stageExtractionPercent && previousStageExtractionPercent) {
       const deltaValues = Object.keys(stageExtractionPercent).map(key => {
@@ -652,12 +641,12 @@ export default function FertiIrrigationCalculator() {
         num_applications: formData.num_applications,
         stage_extraction_pct: microDeltaPercent,
         requirements: {
-          n_kg_ha: getStageAdjustedValue('n_kg_ha', 'N'),
-          p2o5_kg_ha: getStageAdjustedValue('p2o5_kg_ha', 'P2O5'),
-          k2o_kg_ha: getStageAdjustedValue('k2o_kg_ha', 'K2O'),
-          ca_kg_ha: getStageAdjustedValue('ca_kg_ha', 'Ca'),
-          mg_kg_ha: getStageAdjustedValue('mg_kg_ha', 'Mg'),
-          s_kg_ha: getStageAdjustedValue('s_kg_ha', 'S')
+          n_kg_ha: parseFloat(formData.n_kg_ha) || 0,
+          p2o5_kg_ha: parseFloat(formData.p2o5_kg_ha) || 0,
+          k2o_kg_ha: parseFloat(formData.k2o_kg_ha) || 0,
+          ca_kg_ha: parseFloat(formData.ca_kg_ha) || 0,
+          mg_kg_ha: parseFloat(formData.mg_kg_ha) || 0,
+          s_kg_ha: parseFloat(formData.s_kg_ha) || 0
         },
         micro_requirements: {
           fe_g_ha: microReq.fe_g_ha * (microDeltaPercent / 100),
@@ -680,8 +669,27 @@ export default function FertiIrrigationCalculator() {
       }
       
       // Add crop and stage for agronomic minimums calculation
+      const getDeltaPercent = (nutrient) => {
+        if (stageExtractionPercent && previousStageExtractionPercent) {
+          return (stageExtractionPercent[nutrient] || 0) - (previousStageExtractionPercent[nutrient] || 0);
+        }
+        return stageExtractionPercent?.[nutrient] || 0;
+      };
+
       payload.extraction_crop_id = (selectedCropSource === 'catalog' || selectedCropSource === 'predefined') && selectedCropId ? selectedCropId : null;
       payload.extraction_stage_id = selectedStageId || null;
+      payload.previous_stage_id = selectedStageId ? cropStages[cropStages.findIndex(s => s.id === selectedStageId) - 1]?.id || null : null;
+      payload.custom_extraction_percent = (selectedCropSource === 'custom' || selectedCropSource === 'manual') && stageExtractionPercent
+        ? {
+          N: getDeltaPercent('N'),
+          P2O5: getDeltaPercent('P2O5'),
+          K2O: getDeltaPercent('K2O'),
+          Ca: getDeltaPercent('Ca'),
+          Mg: getDeltaPercent('Mg'),
+          S: getDeltaPercent('S')
+        }
+        : null;
+      payload.crop_name = formData.crop_name || null;
       
       const res = await api.post('/api/fertiirrigation/calculate-contributions', payload);
       setNutrientContributions(res);
@@ -1014,6 +1022,17 @@ export default function FertiIrrigationCalculator() {
         }
         return 100;
       };
+
+      const deltaExtractionPercentages = stageExtractionPercent
+        ? {
+          N: getDeltaPercent('N'),
+          P2O5: getDeltaPercent('P2O5'),
+          K2O: getDeltaPercent('K2O'),
+          Ca: getDeltaPercent('Ca'),
+          Mg: getDeltaPercent('Mg'),
+          S: getDeltaPercent('S')
+        }
+        : null;
       
       // Calculate average delta for stage_extraction_pct (used for soil proportioning)
       let avgDeltaPercent = 100;
@@ -1044,28 +1063,16 @@ export default function FertiIrrigationCalculator() {
           (cropStages.find(s => s.id === selectedStageId)?.name || formData.growth_stage) : 
           formData.growth_stage,
         yield_target_ton_ha: parseFloat(formData.yield_target_ton_ha) || 10,
-        n_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.n_kg_ha) || 0) 
-          : (parseFloat(formData.n_kg_ha) || 0) * (getDeltaPercent('N') / 100),
-        p2o5_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.p2o5_kg_ha) || 0) 
-          : (parseFloat(formData.p2o5_kg_ha) || 0) * (getDeltaPercent('P2O5') / 100),
-        k2o_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.k2o_kg_ha) || 0) 
-          : (parseFloat(formData.k2o_kg_ha) || 0) * (getDeltaPercent('K2O') / 100),
-        ca_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.ca_kg_ha) || 0) 
-          : (parseFloat(formData.ca_kg_ha) || 0) * (getDeltaPercent('Ca') / 100),
-        mg_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.mg_kg_ha) || 0) 
-          : (parseFloat(formData.mg_kg_ha) || 0) * (getDeltaPercent('Mg') / 100),
-        s_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.s_kg_ha) || 0) 
-          : (parseFloat(formData.s_kg_ha) || 0) * (getDeltaPercent('S') / 100),
+        n_kg_ha: (parseFloat(formData.n_kg_ha) || 0),
+        p2o5_kg_ha: (parseFloat(formData.p2o5_kg_ha) || 0),
+        k2o_kg_ha: (parseFloat(formData.k2o_kg_ha) || 0),
+        ca_kg_ha: (parseFloat(formData.ca_kg_ha) || 0),
+        mg_kg_ha: (parseFloat(formData.mg_kg_ha) || 0),
+        s_kg_ha: (parseFloat(formData.s_kg_ha) || 0),
         extraction_crop_id: usesCatalogExtraction ? selectedCropId : null,
         extraction_stage_id: selectedStageId || null,
         previous_stage_id: previousStageId,
-        custom_extraction_percent: null
+        custom_extraction_percent: usesCatalogExtraction ? null : deltaExtractionPercentages
       };
 
       const selectedProfile = getSelectedProfile(profileTypeOverride);
@@ -1213,26 +1220,24 @@ export default function FertiIrrigationCalculator() {
       (cropStages.find(s => s.id === selectedStageId)?.name || formData.growth_stage) : 
       formData.growth_stage;
     
-    // Calculate stage-adjusted requirements using DELTA (incremental) percentage
-    const getStageAdjustedValue = (field, extractKey) => {
-      const totalValue = parseFloat(formData[field]) || 0;
-      if (stageExtractionPercent && previousStageExtractionPercent && stageExtractionPercent[extractKey] !== undefined) {
-        const currentPercent = stageExtractionPercent[extractKey] || 0;
-        const prevPercent = previousStageExtractionPercent[extractKey] || 0;
-        const deltaPercent = currentPercent - prevPercent;
-        return totalValue * (deltaPercent / 100);
+    // Calculate stage delta percentages for custom curves
+    const getDeltaPercent = (nutrient) => {
+      if (stageExtractionPercent && previousStageExtractionPercent && stageExtractionPercent[nutrient] !== undefined) {
+        const currentPercent = stageExtractionPercent[nutrient] || 0;
+        const prevPercent = previousStageExtractionPercent[nutrient] || 0;
+        return currentPercent - prevPercent;
       }
-      return totalValue;
+      return stageExtractionPercent?.[nutrient] || 0;
     };
     
     const payload = {
       deficit: {
-        n_kg_ha: getStageAdjustedValue('n_kg_ha', 'N'),
-        p2o5_kg_ha: getStageAdjustedValue('p2o5_kg_ha', 'P2O5'),
-        k2o_kg_ha: getStageAdjustedValue('k2o_kg_ha', 'K2O'),
-        ca_kg_ha: getStageAdjustedValue('ca_kg_ha', 'Ca'),
-        mg_kg_ha: getStageAdjustedValue('mg_kg_ha', 'Mg'),
-        s_kg_ha: getStageAdjustedValue('s_kg_ha', 'S'),
+        n_kg_ha: parseFloat(formData.n_kg_ha) || 0,
+        p2o5_kg_ha: parseFloat(formData.p2o5_kg_ha) || 0,
+        k2o_kg_ha: parseFloat(formData.k2o_kg_ha) || 0,
+        ca_kg_ha: parseFloat(formData.ca_kg_ha) || 0,
+        mg_kg_ha: parseFloat(formData.mg_kg_ha) || 0,
+        s_kg_ha: parseFloat(formData.s_kg_ha) || 0,
       },
       area_ha: parseFloat(formData.area_ha) || 1,
       num_applications: parseInt(formData.num_applications) || 10,
@@ -1265,7 +1270,17 @@ export default function FertiIrrigationCalculator() {
       previous_stage_id: (() => {
         const idx = cropStages.findIndex(s => s.id === selectedStageId);
         return idx > 0 ? cropStages[idx - 1].id : null;
-      })()
+      })(),
+      custom_extraction_percent: (selectedCropSource === 'custom' || selectedCropSource === 'manual') && stageExtractionPercent
+        ? {
+          N: getDeltaPercent('N'),
+          P2O5: getDeltaPercent('P2O5'),
+          K2O: getDeltaPercent('K2O'),
+          Ca: getDeltaPercent('Ca'),
+          Mg: getDeltaPercent('Mg'),
+          S: getDeltaPercent('S')
+        }
+        : null
     };
     
     const PPM_TO_G_HA_FACTOR = 2000;
@@ -1390,6 +1405,8 @@ export default function FertiIrrigationCalculator() {
       soil_contribution: nutrientContributions.soil_contribution || null,
       water_contribution: nutrientContributions.water_contribution || null,
       acid_contribution: nutrientContributions.acid_contribution || null,
+      deficit_real: nutrientContributions.real_deficit || null,
+      deficit_final: nutrientContributions.deficit_final || null,
       deficit_net: nutrientContributions.deficit_final || nutrientContributions.real_deficit || null,
       micro_requirements: nutrientContributions.micro_requirements || null,
       micro_soil_contribution: nutrientContributions.micro_soil_contribution || null,
