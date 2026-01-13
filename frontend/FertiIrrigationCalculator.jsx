@@ -604,6 +604,12 @@ export default function FertiIrrigationCalculator() {
 
   const fetchNutrientContributions = async () => {
     if (!formData.soil_analysis_id) return;
+
+    const negativeDeltaNutrients = getNegativeStageDeltas();
+    if (negativeDeltaNutrients.length > 0) {
+      setError(`La curva de extracción es inválida: la etapa actual tiene porcentajes menores en ${negativeDeltaNutrients.join(', ')}. Corrige la curva o selecciona otra etapa.`);
+      return;
+    }
     
     const getStageAdjustedValue = (field, extractKey) => {
       const totalValue = parseFloat(formData[field]) || 0;
@@ -990,6 +996,13 @@ export default function FertiIrrigationCalculator() {
     setError(null);
 
     try {
+      const negativeDeltaNutrients = getNegativeStageDeltas();
+      if (negativeDeltaNutrients.length > 0) {
+        setError(`La curva de extracción es inválida: la etapa actual tiene porcentajes menores en ${negativeDeltaNutrients.join(', ')}. Corrige la curva o selecciona otra etapa.`);
+        setCalculating(false);
+        return;
+      }
+
       // Calculate DELTA extraction percentage for this stage
       const getDeltaPercent = (nutrient) => {
         if (stageExtractionPercent && previousStageExtractionPercent) {
@@ -1178,6 +1191,18 @@ export default function FertiIrrigationCalculator() {
     if (!coverage.s) missing.push('S');
     
     return { coverage, missing, isComplete: missing.length === 0 };
+  };
+
+  const getNegativeStageDeltas = () => {
+    if (!stageExtractionPercent || !previousStageExtractionPercent) {
+      return [];
+    }
+
+    return Object.keys(stageExtractionPercent).filter(key => {
+      const current = stageExtractionPercent[key] || 0;
+      const prev = previousStageExtractionPercent[key] || 0;
+      return current < prev;
+    });
   };
 
   // Helper function to build optimization payload - shared between both modes
@@ -1465,6 +1490,13 @@ export default function FertiIrrigationCalculator() {
         setOptimizing(false);
         return;
       }
+
+      const negativeDeltaNutrients = getNegativeStageDeltas();
+      if (negativeDeltaNutrients.length > 0) {
+        setError(`La curva de extracción es inválida: la etapa actual tiene porcentajes menores en ${negativeDeltaNutrients.join(', ')}. Corrige la curva o selecciona otra etapa.`);
+        setOptimizing(false);
+        return;
+      }
       
       const payload = buildOptimizationPayload();
       const optimizationDeficits = getOptimizationDeficits(payload);
@@ -1546,6 +1578,13 @@ export default function FertiIrrigationCalculator() {
       // Validate that previous stage data is loaded
       if (stageExtractionPercent && !previousStageExtractionPercent) {
         setError('Espera un momento, cargando datos de la etapa anterior...');
+        setOptimizing(false);
+        return;
+      }
+
+      const negativeDeltaNutrients = getNegativeStageDeltas();
+      if (negativeDeltaNutrients.length > 0) {
+        setError(`La curva de extracción es inválida: la etapa actual tiene porcentajes menores en ${negativeDeltaNutrients.join(', ')}. Corrige la curva o selecciona otra etapa.`);
         setOptimizing(false);
         return;
       }
