@@ -2924,11 +2924,36 @@ def get_available_fertilizers_for_user(db, user_id: int, currency: str = "MXN") 
     ).all()
     user_price_kg_map = {p.fertilizer_id: p.price_per_kg for p in user_prices if p.price_per_kg}
     user_price_liter_map = {p.fertilizer_id: p.price_per_liter for p in user_prices if p.price_per_liter}
+
+    active_my_fertilizers = set()
+    try:
+        from app.models.database_models import FertilizerProduct
+        active_products = db.query(FertilizerProduct).filter(
+            FertilizerProduct.is_active == True
+        ).all()
+        active_my_fertilizers.update({p.slug for p in active_products if p.slug})
+    except Exception:
+        active_my_fertilizers = set()
+
+    custom_ferts = db.query(UserCustomFertilizer).filter(
+        UserCustomFertilizer.user_id == user_id,
+        UserCustomFertilizer.is_active == True
+    ).all()
+    custom_slugs = {f"custom_{cf.id}" for cf in custom_ferts}
+    active_my_fertilizers.update(custom_slugs)
+
+    active_price_ids = set(visible_ids)
+    active_price_ids.update(user_price_kg_map.keys())
+    active_price_ids.update(user_price_liter_map.keys())
+
+    allowed_ids = active_price_ids.intersection(active_my_fertilizers)
     
     result = []
     seen_slugs = set()
     
     for fert_id in visible_ids:
+        if fert_id not in allowed_ids:
+            continue
         if fert_id in seen_slugs:
             continue
         seen_slugs.add(fert_id)
@@ -3022,13 +3047,10 @@ def get_available_fertilizers_for_user(db, user_id: int, currency: str = "MXN") 
             'form': form
         })
     
-    custom_ferts = db.query(UserCustomFertilizer).filter(
-        UserCustomFertilizer.user_id == user_id,
-        UserCustomFertilizer.is_active == True
-    ).all()
-    
     for cf in custom_ferts:
         cf_slug = f"custom_{cf.id}"
+        if cf_slug not in allowed_ids:
+            continue
         if cf_slug not in seen_slugs:
             seen_slugs.add(cf_slug)
             

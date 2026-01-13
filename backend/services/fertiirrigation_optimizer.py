@@ -2099,6 +2099,10 @@ def get_fertigation_fertilizers(db: Session, user_id: Optional[int] = None) -> L
             currency = settings.preferred_currency
     
     user_prices: Dict[str, float] = {}
+    active_price_ids: set = set()
+    active_my_fertilizers: set = set()
+    visible_ids: set = set()
+    allowed_ids: Optional[set] = None
     if user_id:
         prices = db.query(UserFertilizerPrice).filter(
             UserFertilizerPrice.user_id == user_id,
@@ -2109,11 +2113,41 @@ def get_fertigation_fertilizers(db: Session, user_id: Optional[int] = None) -> L
             val = p.price_per_kg if p.price_per_kg is not None else p.price_per_liter
             if val is not None:
                 user_prices[pricing_id] = float(val)
+                active_price_ids.add(pricing_id)
+
+        from app.routers.fertilizer_prices import load_default_fertilizers
+        visible_fertilizers = load_default_fertilizers(db)
+        visible_ids = {f.get('id') for f in visible_fertilizers if f.get('id')}
+        active_price_ids.update(visible_ids)
+
+        try:
+            from app.models.database_models import FertilizerProduct
+            active_products = db.query(FertilizerProduct).filter(
+                FertilizerProduct.is_active == True
+            ).all()
+            active_my_fertilizers.update({p.slug for p in active_products if p.slug})
+        except Exception:
+            active_my_fertilizers = set()
+
+        try:
+            from app.models.hydro_ions_models import UserCustomFertilizer
+            custom_ferts = db.query(UserCustomFertilizer).filter(
+                UserCustomFertilizer.user_id == user_id,
+                UserCustomFertilizer.is_active == True
+            ).all()
+            active_my_fertilizers.update({f"custom_{cf.id}" for cf in custom_ferts})
+        except Exception:
+            active_my_fertilizers = set(active_my_fertilizers)
+
+        allowed_ids = active_price_ids.intersection(active_my_fertilizers)
     
     result: List[Dict[str, Any]] = []
     for item in catalog:
         fert = FertilizerData(item)
         pricing_alias = fert.slug
+
+        if allowed_ids is not None and pricing_alias not in allowed_ids:
+            continue
         
         price = user_prices.get(pricing_alias)
         if price is None:
