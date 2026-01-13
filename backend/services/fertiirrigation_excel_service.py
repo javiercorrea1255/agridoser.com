@@ -88,6 +88,8 @@ class FertiIrrigationExcelService:
         ws_summary = self._create_summary_sheet(wb, calculation, user_name, extraction_curve_info)
         ws_balance = self._create_nutrient_balance_sheet(wb, result)
         ws_program = self._create_fertilizer_program_sheet(wb, result, calculation)
+        self._create_acid_sheet(wb, result, calculation)
+        self._create_soil_depletion_sheet(wb, result)
         self._create_ab_tanks_sheet(wb, result, calculation)
         if extraction_curve_info:
             self._create_extraction_curve_sheet(wb, extraction_curve_info)
@@ -164,24 +166,39 @@ class FertiIrrigationExcelService:
     def _create_nutrient_balance_sheet(self, wb, result: Dict) -> Any:
         """Create the nutrient balance sheet."""
         ws = wb.create_sheet("Balance Nutricional")
+        nutrient_balance = result.get('nutrient_balance', [])
+        has_acid = any((nb.get('acid_contribution_kg_ha', 0) or 0) > 0 for nb in nutrient_balance)
         
-        headers = ["Nutriente", "Requerimiento (kg/ha)", "Disponible Suelo", "Aporte Agua", 
-                   "Déficit", "Eficiencia (%)", "A Aplicar (kg/ha)"]
+        headers = ["Nutriente", "Requerimiento (kg/ha)", "Disponible Suelo", "Aporte Agua"]
+        if has_acid:
+            headers.append("Aporte Ácido")
+        headers += ["Déficit", "Eficiencia (%)", "A Aplicar (kg/ha)"]
         
         for col, header in enumerate(headers, 1):
             ws.cell(row=1, column=col, value=header)
         self._apply_header_style(ws, 1, len(headers))
         
-        nutrient_balance = result.get('nutrient_balance', [])
         row = 2
         for nb in nutrient_balance:
             ws.cell(row=row, column=1, value=nb.get('nutrient', ''))
             ws.cell(row=row, column=2, value=round(nb.get('requirement_kg_ha', 0), 2))
-            ws.cell(row=row, column=3, value=round(nb.get('soil_diagnostic_kg_ha', nb.get('soil_available_kg_ha', 0)), 2))
+            ws.cell(
+                row=row,
+                column=3,
+                value=round(
+                    nb.get('soil_contribution_kg_ha',
+                           nb.get('soil_diagnostic_kg_ha', nb.get('soil_available_kg_ha', 0))),
+                    2
+                )
+            )
             ws.cell(row=row, column=4, value=round(nb.get('water_contribution_kg_ha', 0), 2))
-            ws.cell(row=row, column=5, value=round(nb.get('deficit_kg_ha', 0), 2))
-            ws.cell(row=row, column=6, value=round(nb.get('efficiency_factor', 1) * 100, 0))
-            ws.cell(row=row, column=7, value=round(nb.get('fertilizer_needed_kg_ha', 0), 2))
+            col_offset = 0
+            if has_acid:
+                ws.cell(row=row, column=5, value=round(nb.get('acid_contribution_kg_ha', 0), 2))
+                col_offset = 1
+            ws.cell(row=row, column=5 + col_offset, value=round(nb.get('deficit_kg_ha', 0), 2))
+            ws.cell(row=row, column=6 + col_offset, value=round(nb.get('efficiency_factor', 1) * 100, 0))
+            ws.cell(row=row, column=7 + col_offset, value=round(nb.get('fertilizer_needed_kg_ha', 0), 2))
             
             for col in range(1, len(headers) + 1):
                 ws.cell(row=row, column=col).border = self.border
@@ -207,6 +224,128 @@ class FertiIrrigationExcelService:
             
             ws.add_chart(chart, "I2")
         
+        self._auto_adjust_columns(ws)
+        return ws
+
+    def _create_acid_sheet(self, wb, result: Dict, calculation: Dict) -> Optional[Any]:
+        """Create the acid treatment sheet when acid is present."""
+        acid_treatment = result.get('acid_treatment')
+        acid_program = result.get('acid_program')
+
+        if not acid_treatment and acid_program:
+            ml_per_1000L = acid_program.get('ml_per_1000L', 0)
+            acid_treatment = {
+                'acid_id': acid_program.get('acid_id', ''),
+                'acid_name': acid_program.get('acid_name', ''),
+                'acid_type': acid_program.get('acid_id', ''),
+                'ml_per_1000L': ml_per_1000L,
+                'cost_per_1000L': acid_program.get('cost_per_1000L', 0),
+                'nutrient_contribution': acid_program.get('nutrient_contribution', {}),
+            }
+
+        if not acid_treatment:
+            return None
+
+        if not (acid_treatment.get('acid_name') or acid_treatment.get('ml_per_1000L', 0) > 0 or acid_treatment.get('volume_l_ha', 0) > 0):
+            return None
+
+        ws = wb.create_sheet("Tratamiento Ácido")
+
+        num_applications = calculation.get('num_applications', result.get('num_applications', 10))
+        area_ha = calculation.get('area_ha', result.get('area_ha', 1.0))
+        irrigation_volume_m3_ha = result.get('irrigation_volume_m3_ha', calculation.get('irrigation_volume_m3_ha', 0))
+        water_volume_1000L = calculation.get('water_volume_1000L', result.get('water_volume_1000L', 0))
+        total_water_1000L = water_volume_1000L or (irrigation_volume_m3_ha * num_applications)
+
+        nutrient_contrib = acid_treatment.get('nutrient_contribution', {})
+        nutrient_in_kg_ha = acid_treatment.get('nutrient_in_kg_ha', False)
+
+        if nutrient_in_kg_ha:
+            acid_n = nutrient_contrib.get('N', nutrient_contrib.get('NO3_N', 0)) * area_ha
+            acid_p = nutrient_contrib.get('P', nutrient_contrib.get('P2O5', 0)) * area_ha
+            acid_s = nutrient_contrib.get('S', nutrient_contrib.get('SO4_S', 0)) * area_ha
+        elif nutrient_contrib:
+            acid_n = (nutrient_contrib.get('N', nutrient_contrib.get('NO3_N', 0)) * total_water_1000L) / 1000.0
+            acid_p = (nutrient_contrib.get('P', nutrient_contrib.get('P2O5', 0)) * total_water_1000L) / 1000.0
+            acid_s = (nutrient_contrib.get('S', nutrient_contrib.get('SO4_S', 0)) * total_water_1000L) / 1000.0
+        else:
+            acid_n = acid_treatment.get('n_kg_ha', 0) * area_ha
+            acid_p = acid_treatment.get('p2o5_kg_ha', 0) * area_ha
+            acid_s = acid_treatment.get('s_kg_ha', 0) * area_ha
+
+        acid_name = acid_treatment.get('acid_name', 'Ácido')
+        acid_id = acid_treatment.get('acid_id', acid_treatment.get('acid_type', ''))
+        acid_vol_per_ha = acid_treatment.get('volume_l_ha', 0)
+        acid_vol_total = acid_vol_per_ha * area_ha
+        acid_vol_per_app = acid_vol_total / num_applications if num_applications > 0 else acid_vol_total
+        ml_per_1000L = acid_treatment.get('ml_per_1000L', 0)
+
+        row = 1
+        ws.cell(row=row, column=1, value="TRATAMIENTO CON ÁCIDO").font = self.title_font
+        ws.merge_cells(f'A{row}:B{row}')
+        row += 2
+
+        data = [
+            ("Ácido utilizado:", acid_name),
+            ("ID de ácido:", acid_id),
+        ]
+        if ml_per_1000L:
+            data.append(("Dosis de inyección:", f"{ml_per_1000L:.1f} ml/1000L"))
+        data.extend([
+            ("Dosis por hectárea:", f"{acid_vol_per_ha:.2f} L/ha"),
+            ("Dosis total:", f"{acid_vol_total:.2f} L"),
+            ("Dosis por riego:", f"{acid_vol_per_app:.3f} L"),
+        ])
+
+        if acid_n > 0:
+            data.append(("Aporte de N:", f"{acid_n:.2f} kg"))
+        if acid_p > 0:
+            data.append(("Aporte de P₂O₅:", f"{acid_p:.2f} kg"))
+        if acid_s > 0:
+            data.append(("Aporte de S:", f"{acid_s:.2f} kg"))
+
+        for label, value in data:
+            ws.cell(row=row, column=1, value=label).font = Font(bold=True)
+            ws.cell(row=row, column=1).fill = self.light_fill
+            ws.cell(row=row, column=2, value=value)
+            ws.cell(row=row, column=1).border = self.border
+            ws.cell(row=row, column=2).border = self.border
+            row += 1
+
+        self._auto_adjust_columns(ws)
+        return ws
+
+    def _create_soil_depletion_sheet(self, wb, result: Dict) -> Optional[Any]:
+        """Create the soil depletion sheet when data is available."""
+        nutrient_balance = result.get('nutrient_balance', [])
+        has_soil_depletion = any(
+            nb.get('soil_total_kg_ha', 0) > 0 or nb.get('soil_remaining_kg_ha', 0) > 0
+            for nb in nutrient_balance
+        )
+        if not has_soil_depletion:
+            return None
+
+        ws = wb.create_sheet("Agotamiento Suelo")
+        headers = ["Nutriente", "Total Disp. (kg/ha)", "Consumido Antes (kg/ha)", "Consumido Etapa (kg/ha)", "Restante (kg/ha)", "% Acum."]
+
+        for col, header in enumerate(headers, 1):
+            ws.cell(row=1, column=col, value=header)
+        self._apply_header_style(ws, 1, len(headers))
+
+        row = 2
+        for nb in nutrient_balance:
+            ws.cell(row=row, column=1, value=nb.get('nutrient', ''))
+            ws.cell(row=row, column=2, value=round(nb.get('soil_total_kg_ha', 0), 2))
+            ws.cell(row=row, column=3, value=round(nb.get('soil_consumed_before_kg_ha', 0), 2))
+            ws.cell(row=row, column=4, value=round(nb.get('soil_consumed_this_stage_kg_ha', 0), 2))
+            ws.cell(row=row, column=5, value=round(nb.get('soil_remaining_kg_ha', 0), 2))
+            ws.cell(row=row, column=6, value=f"{nb.get('cumulative_extraction_pct', 0):.1f}%")
+
+            for col in range(1, len(headers) + 1):
+                ws.cell(row=row, column=col).border = self.border
+                ws.cell(row=row, column=col).alignment = Alignment(horizontal='center')
+            row += 1
+
         self._auto_adjust_columns(ws)
         return ws
     
