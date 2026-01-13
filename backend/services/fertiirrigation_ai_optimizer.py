@@ -2967,12 +2967,15 @@ def get_available_fertilizers_for_user(db, user_id: int, currency: str = "MXN") 
         hydro_fert = hydro_by_id.get(fert_id)
         
         if hydro_fert:
-            n_pct = hydro_fert.get('n_pct', 0)
-            p2o5_pct = hydro_fert.get('p2o5_pct', 0)
-            k2o_pct = hydro_fert.get('k2o_pct', 0)
-            ca_pct = hydro_fert.get('ca_pct', 0)
-            mg_pct = hydro_fert.get('mg_pct', 0)
-            s_pct = hydro_fert.get('s_pct', 0)
+            nutrient_comp = hydro_fert.get('nutrient_composition', {}) or {}
+            n_pct = nutrient_comp.get('N_percent', 0) or 0
+            p_elem = nutrient_comp.get('P_percent', 0) or 0
+            k_elem = nutrient_comp.get('K_percent', 0) or 0
+            p2o5_pct = p_elem * 2.29
+            k2o_pct = k_elem * 1.2047
+            ca_pct = nutrient_comp.get('Ca_percent', 0) or 0
+            mg_pct = nutrient_comp.get('Mg_percent', 0) or 0
+            s_pct = nutrient_comp.get('S_percent', 0) or 0
             fert_name = hydro_fert.get('name', fert_id)
             fert_type = hydro_fert.get('type', 'salt')
             stock_tank = hydro_fert.get('stock_tank', 'B')
