@@ -837,9 +837,9 @@ async def calculate_fertiirrigation(
     if crop_data.extraction_crop_id and crop_data.previous_stage_id:
         stages = fertiirrigation_calculator.get_crop_stages(crop_data.extraction_crop_id)
         prev_stage = next((s for s in stages if s.get("id") == crop_data.previous_stage_id), None)
-        if prev_stage and prev_stage.get("extraction_percent"):
+        if prev_stage and prev_stage.get("cumulative_percent"):
             # Previous stage's cumulative percentage (average of all nutrients)
-            pct = prev_stage["extraction_percent"]
+            pct = prev_stage["cumulative_percent"]
             if isinstance(pct, dict):
                 values = [v for v in pct.values() if isinstance(v, (int, float))]
                 previous_cumulative_pct = sum(values) / len(values) if values else None
