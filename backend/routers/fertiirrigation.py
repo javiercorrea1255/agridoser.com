@@ -10,6 +10,7 @@ from sqlalchemy import desc
 import io
 import json
 import logging
+import math
 import re
 
 from app.database import get_db
@@ -277,118 +278,42 @@ async def get_irrigation_suggestion(
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Get AI-suggested irrigation parameters based on soil texture and crop phenological stage.
-    Uses GPT-4 to provide agronomically sound recommendations.
+    Get deterministic irrigation parameters based on soil texture and crop stage.
     """
-    from openai import OpenAI
-    import os
-    
-    try:
-        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-        
-        system_prompt = """Eres un experto agrónomo especializado en manejo de riego y fertirrigación.
-Tu tarea es recomendar parámetros de riego para UNA ETAPA FENOLÓGICA ESPECÍFICA, basándote en:
-1. La textura del suelo (afecta capacidad de retención de agua y drenaje)
-2. El cultivo y su etapa fenológica (afecta demanda hídrica)
-3. El sistema de riego (eficiencia de aplicación)
-4. El % de absorción de nutrientes en esta etapa (indica intensidad de la demanda)
+    texture = (request.soil_texture or "").lower()
+    extraction_pct = request.extraction_percent or 0
+    stage_days = request.stage_duration_days or 0
 
-IMPORTANTE: El número de aplicaciones es para ESTA ETAPA FENOLÓGICA, no para todo el ciclo del cultivo.
+    texture_frequency = {
+        "arenoso": 2,
+        "franco": 4,
+        "franco-arenoso": 3,
+        "franco-arcilloso": 5,
+        "arcilloso": 7
+    }
+    base_frequency = texture_frequency.get(texture, 4)
+    frequency_days = max(1, min(14, base_frequency))
 
-REGLAS:
-- Frecuencia de riego: 1-14 días (suelos arenosos = más frecuente, arcillosos = menos frecuente)
-- Volumen por riego: 5-120 m³/ha (considerar textura y etapa)
-- Número de aplicaciones: 4-30 para esta etapa (proporcional al % de absorción de la etapa)
+    volume_base = 20 + (extraction_pct / 100) * 60
+    volume_texture_adjust = 5 if "arenoso" in texture else (-5 if "arcilloso" in texture else 0)
+    volume_m3_ha = max(5, min(120, round(volume_base + volume_texture_adjust, 1)))
 
-Debes responder ÚNICAMENTE con un objeto JSON válido, sin texto adicional:
-{
-  "frequency_days": <número entero 1-14>,
-  "volume_m3_ha": <número decimal 5-120>,
-  "num_applications": <número entero 4-30 para esta etapa>,
-  "rationale": "<explicación breve en español de por qué recomiendas estos valores para ESTA ETAPA>"
-}"""
+    if stage_days > 0:
+        num_applications = max(4, min(30, math.ceil(stage_days / frequency_days)))
+    else:
+        num_applications = max(4, min(30, round(4 + (extraction_pct / 100) * 26)))
 
-        extraction_info = ""
-        if request.extraction_percent:
-            extraction_info = f"\n- Absorción acumulada en esta etapa: {request.extraction_percent:.0f}% del total del ciclo"
-        
-        duration_info = ""
-        if request.stage_duration_days:
-            duration_info = f"\n- Duración de esta etapa: {request.stage_duration_days} días"
+    rationale = (
+        "Parámetros calculados de forma determinística según textura del suelo, "
+        "porcentaje de extracción y duración de la etapa."
+    )
 
-        user_prompt = f"""Recomienda parámetros de riego para ESTA ETAPA FENOLÓGICA:
-- Textura del suelo: {request.soil_texture}
-- Cultivo: {request.crop_name}
-- Etapa fenológica: {request.phenological_stage or 'No especificada'}
-- Sistema de riego: {request.irrigation_system}{extraction_info}{duration_info}
-
-IMPORTANTE: Si la etapa dura N días y recomiendas regar cada X días, el número de aplicaciones = N / X (redondeado hacia arriba).
-Por ejemplo: 30 días de etapa ÷ 3 días de frecuencia = 10 aplicaciones.
-Responde solo con el JSON."""
-
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3,
-            max_tokens=500
-        )
-        
-        content = response.choices[0].message.content.strip()
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-        
-        import json as json_module
-        import math
-        result = json_module.loads(content)
-        
-        frequency = max(1, min(14, int(result.get("frequency_days", 7))))
-        volume = max(5, min(120, float(result.get("volume_m3_ha", 50))))
-        
-        # Enforce stage-duration coherence: recalculate applications from duration if available
-        if request.stage_duration_days and request.stage_duration_days > 0:
-            num_apps = max(4, min(30, math.ceil(request.stage_duration_days / frequency)))
-        else:
-            num_apps = max(4, min(30, int(result.get("num_applications", 10))))
-        
-        return IrrigationSuggestionResponse(
-            frequency_days=frequency,
-            volume_m3_ha=volume,
-            num_applications=num_apps,
-            rationale=result.get("rationale", "Valores sugeridos para esta etapa fenológica.")
-        )
-        
-    except Exception as e:
-        logger.error(f"Error getting irrigation suggestion: {e}")
-        texture_lower = request.soil_texture.lower()
-        if "aren" in texture_lower:
-            freq, vol = 2, 30
-        elif "arcill" in texture_lower:
-            freq, vol = 5, 60
-        else:
-            freq, vol = 3, 45
-        
-        # Calculate applications based on stage duration if available
-        import math
-        if request.stage_duration_days and request.stage_duration_days > 0:
-            base_apps = max(4, min(30, math.ceil(request.stage_duration_days / freq)))
-        elif request.extraction_percent:
-            # Fallback: Scale applications proportionally to extraction
-            base_apps = max(4, min(30, int(request.extraction_percent / 100 * 30)))
-        else:
-            base_apps = 10
-        
-        return IrrigationSuggestionResponse(
-            frequency_days=freq,
-            volume_m3_ha=vol,
-            num_applications=base_apps,
-            rationale=f"Valores predeterminados para suelo {request.soil_texture} en esta etapa. La IA no está disponible en este momento."
-        )
+    return IrrigationSuggestionResponse(
+        frequency_days=frequency_days,
+        volume_m3_ha=volume_m3_ha,
+        num_applications=num_applications,
+        rationale=rationale
+    )
 
 
 class MicroRequirements(BaseModel):
@@ -2347,6 +2272,7 @@ class AIOptimizeRequest(BaseModel):
     water_volume_m3_ha: float = 50.0
     area_ha: float = 1.0
     user_acid_prices: Optional[Dict[str, float]] = None
+    traceability: Optional[Dict[str, Any]] = None
 
 
 class AIFertilizerDose(BaseModel):
@@ -2379,6 +2305,7 @@ class AIProfileResult(BaseModel):
     micro_cost_per_ha: float = 0
     coverage: Dict[str, float]
     notes: str = ""
+    traceability: Optional[Dict[str, Any]] = None
 
 
 class AIAcidRecommendation(BaseModel):
@@ -2420,13 +2347,13 @@ async def ai_optimize_fertigation(
     db: Session = Depends(get_db)
 ):
     """
-    AI-powered fertilization optimization using GPT-4.
-    
+    Deterministic fertilization optimization.
+
     Generates 3 fertilization profiles (Economic, Balanced, Complete) based on:
     - Nutrient deficits to cover
     - Available fertilizers from user's catalog
     - Drip irrigation compatibility
-    
+
     Returns fertilizer recommendations with doses in kg/ha.
     """
     usage_service = UsageLimitService(db)
@@ -2438,7 +2365,6 @@ async def ai_optimize_fertigation(
         )
     
     from app.services.fertiirrigation_ai_optimizer import (
-        optimize_with_ai,
         optimize_deterministic,
         get_available_fertilizers_for_user
     )
@@ -2496,7 +2422,8 @@ async def ai_optimize_fertigation(
                 agronomic_context=agronomic_context,
                 water_volume_m3_ha=request.water_volume_m3_ha,
                 area_ha=request.area_ha,
-                user_acid_prices=request.user_acid_prices
+                user_acid_prices=request.user_acid_prices,
+                traceability_context=request.traceability
             )
         
         if not result.get("success"):
@@ -2561,7 +2488,8 @@ async def ai_optimize_fertigation(
                 macro_cost_per_ha=round(macro_cost, 2),
                 micro_cost_per_ha=round(micro_cost, 2),
                 coverage=profile_data.get("coverage", {}),
-                notes=profile_data.get("notes", "")
+                notes=profile_data.get("notes", ""),
+                traceability=profile_data.get("traceability")
             )
         
         usage_service.increment_usage(current_user, 'irrigation')
