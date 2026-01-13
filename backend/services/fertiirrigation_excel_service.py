@@ -115,6 +115,16 @@ class FertiIrrigationExcelService:
         ws.merge_cells(f'A{row}:B{row}')
         row += 1
         
+        irrigation_frequency_days = calculation.get(
+            'irrigation_frequency_days',
+            calculation.get('irrigation', {}).get('irrigation_frequency_days')
+        )
+        irrigation_volume_m3_ha = calculation.get(
+            'irrigation_volume_m3_ha',
+            calculation.get('irrigation', {}).get('irrigation_volume_m3_ha')
+        )
+        stage_duration = extraction_info.get('duration_days') if extraction_info else None
+
         info_data = [
             ("Nombre del Cálculo:", calculation.get('name', 'Sin nombre')),
             ("Usuario:", user_name),
@@ -124,6 +134,22 @@ class FertiIrrigationExcelService:
             ("Análisis de Agua:", calculation.get('water_analysis_name', 'N/A')),
             ("N° Aplicaciones:", calculation.get('num_applications', 10)),
         ]
+
+        if irrigation_frequency_days:
+            info_data.append(("Frecuencia de riego (días):", irrigation_frequency_days))
+        if irrigation_volume_m3_ha:
+            info_data.append(("Volumen de riego (m³/ha):", irrigation_volume_m3_ha))
+        if stage_duration:
+            if isinstance(stage_duration, dict):
+                min_days = stage_duration.get('min')
+                max_days = stage_duration.get('max')
+                if min_days is not None and max_days is not None:
+                    duration_label = f"{min_days}-{max_days}"
+                else:
+                    duration_label = str(stage_duration)
+            else:
+                duration_label = str(stage_duration)
+            info_data.append(("Duración de etapa (días):", duration_label))
         
         if extraction_info:
             info_data.append(("Curva de Extracción:", f"{extraction_info.get('crop_name', '')} - {extraction_info.get('stage_name', '')}"))

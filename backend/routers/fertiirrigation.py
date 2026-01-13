@@ -1911,6 +1911,8 @@ async def generate_fertiirrigation_pdf(
         "crop_name": calculation.crop_name,
         "area_ha": calculation.area_ha,
         "num_applications": result_data.get("num_applications", 10),
+        "irrigation_frequency_days": calculation.irrigation_frequency_days,
+        "irrigation_volume_m3_ha": calculation.irrigation_volume_m3_ha,
         "result": result_data,
         "price_map": price_map,
         "user_currency": user_currency
@@ -1932,7 +1934,8 @@ async def generate_fertiirrigation_pdf(
                 "stage_id": extraction_stage_id,
                 "crop_name": crop_info.get("name", extraction_crop_id),
                 "stage_name": stage_info.get("name", extraction_stage_id),
-                "percentages": curve_percentages
+                "percentages": curve_percentages,
+                "duration_days": stage_info.get("duration_days")
             }
     
     if calculation.soil_analysis_id:
@@ -2001,6 +2004,8 @@ async def generate_fertiirrigation_excel(
         "crop_name": calculation.crop_name,
         "area_ha": calculation.area_ha,
         "num_applications": result_data.get("num_applications", 10),
+        "irrigation_frequency_days": calculation.irrigation_frequency_days,
+        "irrigation_volume_m3_ha": calculation.irrigation_volume_m3_ha,
         "result": result_data,
         "fertilizer_program": calculation.fertilizer_program or []
     }
@@ -2022,7 +2027,8 @@ async def generate_fertiirrigation_excel(
                 "stage_id": extraction_stage_id,
                 "crop_name": crop_info.get("name", extraction_crop_id),
                 "stage_name": stage_info.get("name", extraction_stage_id),
-                "percentages": curve_percentages
+                "percentages": curve_percentages,
+                "duration_days": stage_info.get("duration_days")
             }
     
     if calculation.soil_analysis_id:
