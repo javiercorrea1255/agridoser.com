@@ -886,6 +886,16 @@ def create_fertiirrigation_pdf_report(
     extraction_crop_name = extraction_info.get('crop_name')
     extraction_stage_name = extraction_info.get('stage_name')
     extraction_percentages = extraction_info.get('percentages', {})
+    extraction_stage_duration = extraction_info.get('duration_days')
+
+    irrigation_frequency_days = result.get(
+        'irrigation_frequency_days',
+        calculation.get('irrigation_frequency_days', calculation.get('irrigation', {}).get('irrigation_frequency_days'))
+    )
+    irrigation_volume_m3_ha = result.get(
+        'irrigation_volume_m3_ha',
+        calculation.get('irrigation_volume_m3_ha', calculation.get('irrigation', {}).get('irrigation_volume_m3_ha'))
+    )
     
     params_data = [
         ["Análisis de Suelo:", soil_info],
@@ -894,9 +904,27 @@ def create_fertiirrigation_pdf_report(
         ["Área:", f"{area_ha} ha"],
         ["Aplicaciones:", str(num_apps)],
     ]
-    
+
+    if irrigation_frequency_days:
+        params_data.append(["Frecuencia de riego:", f"{irrigation_frequency_days} días"])
+    if irrigation_volume_m3_ha:
+        params_data.append(["Volumen por riego:", f"{irrigation_volume_m3_ha} m³/ha"])
+    if irrigation_frequency_days and num_apps:
+        params_data.append(["Recomendación de riegos:", f"{num_apps} riegos cada {irrigation_frequency_days} días"])
+
     if extraction_crop_name and extraction_stage_name:
         params_data.append(["Curva Extracción:", f"{extraction_crop_name} - {extraction_stage_name}"])
+        if extraction_stage_duration:
+            if isinstance(extraction_stage_duration, dict):
+                min_days = extraction_stage_duration.get('min')
+                max_days = extraction_stage_duration.get('max')
+                if min_days is not None and max_days is not None:
+                    duration_label = f"{min_days}-{max_days} días"
+                else:
+                    duration_label = str(extraction_stage_duration)
+            else:
+                duration_label = str(extraction_stage_duration)
+            params_data.append(["Duración de etapa:", duration_label])
     
     params_table = Table(params_data, colWidths=[1.6*inch, 5.1*inch])
     params_table.setStyle(TableStyle([
@@ -985,7 +1013,7 @@ def create_fertiirrigation_pdf_report(
     
     if acid_has_nutrient_contrib:
         nutrients_data = [
-            ["Nutriente", "Req.\n(kg/ha)", "Aporte\nSuelo", "Aporte\nAgua", "Aporte\nÁcido", "Déficit", "Efic.", "Aplicar\n(kg/ha)"],
+            ["Nutriente", "Req.\n(kg/ha)", "Aporte\nSuelo", "Aporte\nAgua", "Aporte\nÁcido", "Déficit\nReal", "Déficit\nSeg.", "Déficit\nFinal", "Efic.", "Aplicar\n(kg/ha)"],
         ]
         for nb in nutrient_balance:
             nutrients_data.append([
@@ -994,14 +1022,19 @@ def create_fertiirrigation_pdf_report(
                 f"{nb.get('soil_contribution_kg_ha', 0):.1f}",
                 f"{nb.get('water_contribution_kg_ha', 0):.1f}",
                 f"{nb.get('acid_contribution_kg_ha', 0):.1f}",
+                f"{nb.get('deficit_real_kg_ha', 0):.1f}",
+                f"{nb.get('deficit_security_kg_ha', 0):.1f}",
                 f"{nb.get('deficit_kg_ha', 0):.1f}",
                 f"{nb.get('efficiency_factor', 1)*100:.0f}%",
                 f"{nb.get('fertilizer_needed_kg_ha', 0):.1f}",
             ])
-        nutrients_table = Table(nutrients_data, colWidths=[0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.6*inch, 0.75*inch])
+        nutrients_table = Table(
+            nutrients_data,
+            colWidths=[0.6*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.7*inch, 0.6*inch, 0.8*inch]
+        )
     else:
         nutrients_data = [
-            ["Nutriente", "Req.\n(kg/ha)", "Aporte\nSuelo", "Aporte\nAgua", "Déficit", "Efic.", "Aplicar\n(kg/ha)"],
+            ["Nutriente", "Req.\n(kg/ha)", "Aporte\nSuelo", "Aporte\nAgua", "Déficit\nReal", "Déficit\nSeg.", "Déficit\nFinal", "Efic.", "Aplicar\n(kg/ha)"],
         ]
         for nb in nutrient_balance:
             nutrients_data.append([
@@ -1009,11 +1042,16 @@ def create_fertiirrigation_pdf_report(
                 f"{nb.get('requirement_kg_ha', 0):.1f}",
                 f"{nb.get('soil_contribution_kg_ha', 0):.1f}",
                 f"{nb.get('water_contribution_kg_ha', 0):.1f}",
+                f"{nb.get('deficit_real_kg_ha', 0):.1f}",
+                f"{nb.get('deficit_security_kg_ha', 0):.1f}",
                 f"{nb.get('deficit_kg_ha', 0):.1f}",
                 f"{nb.get('efficiency_factor', 1)*100:.0f}%",
                 f"{nb.get('fertilizer_needed_kg_ha', 0):.1f}",
             ])
-        nutrients_table = Table(nutrients_data, colWidths=[0.85*inch, 0.85*inch, 0.85*inch, 0.85*inch, 0.85*inch, 0.7*inch, 0.85*inch])
+        nutrients_table = Table(
+            nutrients_data,
+            colWidths=[0.7*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.75*inch, 0.6*inch, 0.85*inch]
+        )
     nutrients_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), FERTIRRIEGO_COLOR),
         ('TEXTCOLOR', (0, 0), (-1, 0), HexColor("#ffffff")),

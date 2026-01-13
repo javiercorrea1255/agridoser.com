@@ -604,17 +604,12 @@ export default function FertiIrrigationCalculator() {
 
   const fetchNutrientContributions = async () => {
     if (!formData.soil_analysis_id) return;
-    
-    const getStageAdjustedValue = (field, extractKey) => {
-      const totalValue = parseFloat(formData[field]) || 0;
-      if (stageExtractionPercent && previousStageExtractionPercent && stageExtractionPercent[extractKey] !== undefined) {
-        const currentPercent = stageExtractionPercent[extractKey] || 0;
-        const prevPercent = previousStageExtractionPercent[extractKey] || 0;
-        const deltaPercent = currentPercent - prevPercent;
-        return totalValue * (deltaPercent / 100);
-      }
-      return totalValue;
-    };
+
+    const negativeDeltaNutrients = getNegativeStageDeltas();
+    if (negativeDeltaNutrients.length > 0) {
+      setError(`La curva de extracción es inválida: la etapa actual tiene porcentajes menores en ${negativeDeltaNutrients.join(', ')}. Corrige la curva o selecciona otra etapa.`);
+      return;
+    }
     
     let microDeltaPercent = 100;
     if (stageExtractionPercent && previousStageExtractionPercent) {
@@ -646,12 +641,12 @@ export default function FertiIrrigationCalculator() {
         num_applications: formData.num_applications,
         stage_extraction_pct: microDeltaPercent,
         requirements: {
-          n_kg_ha: getStageAdjustedValue('n_kg_ha', 'N'),
-          p2o5_kg_ha: getStageAdjustedValue('p2o5_kg_ha', 'P2O5'),
-          k2o_kg_ha: getStageAdjustedValue('k2o_kg_ha', 'K2O'),
-          ca_kg_ha: getStageAdjustedValue('ca_kg_ha', 'Ca'),
-          mg_kg_ha: getStageAdjustedValue('mg_kg_ha', 'Mg'),
-          s_kg_ha: getStageAdjustedValue('s_kg_ha', 'S')
+          n_kg_ha: parseFloat(formData.n_kg_ha) || 0,
+          p2o5_kg_ha: parseFloat(formData.p2o5_kg_ha) || 0,
+          k2o_kg_ha: parseFloat(formData.k2o_kg_ha) || 0,
+          ca_kg_ha: parseFloat(formData.ca_kg_ha) || 0,
+          mg_kg_ha: parseFloat(formData.mg_kg_ha) || 0,
+          s_kg_ha: parseFloat(formData.s_kg_ha) || 0
         },
         micro_requirements: {
           fe_g_ha: microReq.fe_g_ha * (microDeltaPercent / 100),
@@ -674,8 +669,27 @@ export default function FertiIrrigationCalculator() {
       }
       
       // Add crop and stage for agronomic minimums calculation
+      const getDeltaPercent = (nutrient) => {
+        if (stageExtractionPercent && previousStageExtractionPercent) {
+          return (stageExtractionPercent[nutrient] || 0) - (previousStageExtractionPercent[nutrient] || 0);
+        }
+        return stageExtractionPercent?.[nutrient] || 0;
+      };
+
       payload.extraction_crop_id = (selectedCropSource === 'catalog' || selectedCropSource === 'predefined') && selectedCropId ? selectedCropId : null;
       payload.extraction_stage_id = selectedStageId || null;
+      payload.previous_stage_id = selectedStageId ? cropStages[cropStages.findIndex(s => s.id === selectedStageId) - 1]?.id || null : null;
+      payload.custom_extraction_percent = (selectedCropSource === 'custom' || selectedCropSource === 'manual') && stageExtractionPercent
+        ? {
+          N: getDeltaPercent('N'),
+          P2O5: getDeltaPercent('P2O5'),
+          K2O: getDeltaPercent('K2O'),
+          Ca: getDeltaPercent('Ca'),
+          Mg: getDeltaPercent('Mg'),
+          S: getDeltaPercent('S')
+        }
+        : null;
+      payload.crop_name = formData.crop_name || null;
       
       const res = await api.post('/api/fertiirrigation/calculate-contributions', payload);
       setNutrientContributions(res);
@@ -990,6 +1004,13 @@ export default function FertiIrrigationCalculator() {
     setError(null);
 
     try {
+      const negativeDeltaNutrients = getNegativeStageDeltas();
+      if (negativeDeltaNutrients.length > 0) {
+        setError(`La curva de extracción es inválida: la etapa actual tiene porcentajes menores en ${negativeDeltaNutrients.join(', ')}. Corrige la curva o selecciona otra etapa.`);
+        setCalculating(false);
+        return;
+      }
+
       // Calculate DELTA extraction percentage for this stage
       const getDeltaPercent = (nutrient) => {
         if (stageExtractionPercent && previousStageExtractionPercent) {
@@ -1001,6 +1022,17 @@ export default function FertiIrrigationCalculator() {
         }
         return 100;
       };
+
+      const deltaExtractionPercentages = stageExtractionPercent
+        ? {
+          N: getDeltaPercent('N'),
+          P2O5: getDeltaPercent('P2O5'),
+          K2O: getDeltaPercent('K2O'),
+          Ca: getDeltaPercent('Ca'),
+          Mg: getDeltaPercent('Mg'),
+          S: getDeltaPercent('S')
+        }
+        : null;
       
       // Calculate average delta for stage_extraction_pct (used for soil proportioning)
       let avgDeltaPercent = 100;
@@ -1031,28 +1063,16 @@ export default function FertiIrrigationCalculator() {
           (cropStages.find(s => s.id === selectedStageId)?.name || formData.growth_stage) : 
           formData.growth_stage,
         yield_target_ton_ha: parseFloat(formData.yield_target_ton_ha) || 10,
-        n_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.n_kg_ha) || 0) 
-          : (parseFloat(formData.n_kg_ha) || 0) * (getDeltaPercent('N') / 100),
-        p2o5_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.p2o5_kg_ha) || 0) 
-          : (parseFloat(formData.p2o5_kg_ha) || 0) * (getDeltaPercent('P2O5') / 100),
-        k2o_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.k2o_kg_ha) || 0) 
-          : (parseFloat(formData.k2o_kg_ha) || 0) * (getDeltaPercent('K2O') / 100),
-        ca_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.ca_kg_ha) || 0) 
-          : (parseFloat(formData.ca_kg_ha) || 0) * (getDeltaPercent('Ca') / 100),
-        mg_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.mg_kg_ha) || 0) 
-          : (parseFloat(formData.mg_kg_ha) || 0) * (getDeltaPercent('Mg') / 100),
-        s_kg_ha: usesCatalogExtraction 
-          ? (parseFloat(formData.s_kg_ha) || 0) 
-          : (parseFloat(formData.s_kg_ha) || 0) * (getDeltaPercent('S') / 100),
+        n_kg_ha: (parseFloat(formData.n_kg_ha) || 0),
+        p2o5_kg_ha: (parseFloat(formData.p2o5_kg_ha) || 0),
+        k2o_kg_ha: (parseFloat(formData.k2o_kg_ha) || 0),
+        ca_kg_ha: (parseFloat(formData.ca_kg_ha) || 0),
+        mg_kg_ha: (parseFloat(formData.mg_kg_ha) || 0),
+        s_kg_ha: (parseFloat(formData.s_kg_ha) || 0),
         extraction_crop_id: usesCatalogExtraction ? selectedCropId : null,
         extraction_stage_id: selectedStageId || null,
         previous_stage_id: previousStageId,
-        custom_extraction_percent: null
+        custom_extraction_percent: usesCatalogExtraction ? null : deltaExtractionPercentages
       };
 
       const selectedProfile = getSelectedProfile(profileTypeOverride);
@@ -1180,6 +1200,18 @@ export default function FertiIrrigationCalculator() {
     return { coverage, missing, isComplete: missing.length === 0 };
   };
 
+  const getNegativeStageDeltas = () => {
+    if (!stageExtractionPercent || !previousStageExtractionPercent) {
+      return [];
+    }
+
+    return Object.keys(stageExtractionPercent).filter(key => {
+      const current = stageExtractionPercent[key] || 0;
+      const prev = previousStageExtractionPercent[key] || 0;
+      return current < prev;
+    });
+  };
+
   // Helper function to build optimization payload - shared between both modes
   const buildOptimizationPayload = () => {
     const selectedSoil = getSelectedSoil();
@@ -1188,26 +1220,24 @@ export default function FertiIrrigationCalculator() {
       (cropStages.find(s => s.id === selectedStageId)?.name || formData.growth_stage) : 
       formData.growth_stage;
     
-    // Calculate stage-adjusted requirements using DELTA (incremental) percentage
-    const getStageAdjustedValue = (field, extractKey) => {
-      const totalValue = parseFloat(formData[field]) || 0;
-      if (stageExtractionPercent && previousStageExtractionPercent && stageExtractionPercent[extractKey] !== undefined) {
-        const currentPercent = stageExtractionPercent[extractKey] || 0;
-        const prevPercent = previousStageExtractionPercent[extractKey] || 0;
-        const deltaPercent = currentPercent - prevPercent;
-        return totalValue * (deltaPercent / 100);
+    // Calculate stage delta percentages for custom curves
+    const getDeltaPercent = (nutrient) => {
+      if (stageExtractionPercent && previousStageExtractionPercent && stageExtractionPercent[nutrient] !== undefined) {
+        const currentPercent = stageExtractionPercent[nutrient] || 0;
+        const prevPercent = previousStageExtractionPercent[nutrient] || 0;
+        return currentPercent - prevPercent;
       }
-      return totalValue;
+      return stageExtractionPercent?.[nutrient] || 0;
     };
     
     const payload = {
       deficit: {
-        n_kg_ha: getStageAdjustedValue('n_kg_ha', 'N'),
-        p2o5_kg_ha: getStageAdjustedValue('p2o5_kg_ha', 'P2O5'),
-        k2o_kg_ha: getStageAdjustedValue('k2o_kg_ha', 'K2O'),
-        ca_kg_ha: getStageAdjustedValue('ca_kg_ha', 'Ca'),
-        mg_kg_ha: getStageAdjustedValue('mg_kg_ha', 'Mg'),
-        s_kg_ha: getStageAdjustedValue('s_kg_ha', 'S'),
+        n_kg_ha: parseFloat(formData.n_kg_ha) || 0,
+        p2o5_kg_ha: parseFloat(formData.p2o5_kg_ha) || 0,
+        k2o_kg_ha: parseFloat(formData.k2o_kg_ha) || 0,
+        ca_kg_ha: parseFloat(formData.ca_kg_ha) || 0,
+        mg_kg_ha: parseFloat(formData.mg_kg_ha) || 0,
+        s_kg_ha: parseFloat(formData.s_kg_ha) || 0,
       },
       area_ha: parseFloat(formData.area_ha) || 1,
       num_applications: parseInt(formData.num_applications) || 10,
@@ -1240,7 +1270,17 @@ export default function FertiIrrigationCalculator() {
       previous_stage_id: (() => {
         const idx = cropStages.findIndex(s => s.id === selectedStageId);
         return idx > 0 ? cropStages[idx - 1].id : null;
-      })()
+      })(),
+      custom_extraction_percent: (selectedCropSource === 'custom' || selectedCropSource === 'manual') && stageExtractionPercent
+        ? {
+          N: getDeltaPercent('N'),
+          P2O5: getDeltaPercent('P2O5'),
+          K2O: getDeltaPercent('K2O'),
+          Ca: getDeltaPercent('Ca'),
+          Mg: getDeltaPercent('Mg'),
+          S: getDeltaPercent('S')
+        }
+        : null
     };
     
     const PPM_TO_G_HA_FACTOR = 2000;
@@ -1309,6 +1349,73 @@ export default function FertiIrrigationCalculator() {
     return payload;
   };
 
+  const getOptimizationDeficits = (payload) => {
+    const fallback = payload.deficit || {};
+    const realDeficit = nutrientContributions?.deficit_final || nutrientContributions?.real_deficit || null;
+
+    const resolved = realDeficit || {
+      N: fallback.n_kg_ha || 0,
+      P2O5: fallback.p2o5_kg_ha || 0,
+      K2O: fallback.k2o_kg_ha || 0,
+      Ca: fallback.ca_kg_ha || 0,
+      Mg: fallback.mg_kg_ha || 0,
+      S: fallback.s_kg_ha || 0
+    };
+
+    return {
+      N: Math.max(0, resolved.N || 0),
+      P2O5: Math.max(0, resolved.P2O5 || 0),
+      K2O: Math.max(0, resolved.K2O || 0),
+      Ca: Math.max(0, resolved.Ca || 0),
+      Mg: Math.max(0, resolved.Mg || 0),
+      S: Math.max(0, resolved.S || 0)
+    };
+  };
+
+  const getOptimizationMicroDeficits = (payload) => {
+    const realMicro = nutrientContributions?.micro_real_deficit || null;
+    const fallback = payload.micro_deficit || {};
+
+    const resolved = realMicro || {
+      Fe: fallback.fe_g_ha || 0,
+      Mn: fallback.mn_g_ha || 0,
+      Zn: fallback.zn_g_ha || 0,
+      Cu: fallback.cu_g_ha || 0,
+      B: fallback.b_g_ha || 0,
+      Mo: fallback.mo_g_ha || 0
+    };
+
+    return {
+      Fe: Math.max(0, resolved.Fe || 0),
+      Mn: Math.max(0, resolved.Mn || 0),
+      Zn: Math.max(0, resolved.Zn || 0),
+      Cu: Math.max(0, resolved.Cu || 0),
+      B: Math.max(0, resolved.B || 0),
+      Mo: Math.max(0, resolved.Mo || 0)
+    };
+  };
+
+  const buildTraceabilityPayload = () => {
+    if (!nutrientContributions) {
+      return null;
+    }
+
+    return {
+      requirements: nutrientContributions.requirements || null,
+      soil_contribution: nutrientContributions.soil_contribution || null,
+      water_contribution: nutrientContributions.water_contribution || null,
+      acid_contribution: nutrientContributions.acid_contribution || null,
+      deficit_real: nutrientContributions.real_deficit || null,
+      deficit_final: nutrientContributions.deficit_final || null,
+      deficit_net: nutrientContributions.deficit_final || nutrientContributions.real_deficit || null,
+      micro_requirements: nutrientContributions.micro_requirements || null,
+      micro_soil_contribution: nutrientContributions.micro_soil_contribution || null,
+      micro_water_contribution: nutrientContributions.micro_water_contribution || null,
+      micro_deficit_net: nutrientContributions.micro_real_deficit || null,
+      water_analysis: nutrientContributions.water_analysis || null
+    };
+  };
+
   // Helper function to transform AI response to display format
   const transformAIResponse = (aiRes, acidRec = null) => {
     const aiProfiles = aiRes.profiles || aiRes;
@@ -1374,6 +1481,7 @@ export default function FertiIrrigationCalculator() {
           grand_total_ha: totalCostHa + acidCostHa,
           grand_total_total: (totalCostHa + acidCostHa) * areaHa,
           coverage: profile.coverage || {},
+          traceability: profile.traceability || null,
           warnings: [],
           score: 95,
           notes: profile.notes || ''
@@ -1384,7 +1492,7 @@ export default function FertiIrrigationCalculator() {
     return { profiles: transformedProfiles, currency: userCurrency.code };
   };
 
-  // IA GROWER OPTIMIZER - Automatic mode using FULL fertilizer catalog
+  // DETERMINISTIC OPTIMIZER - Automatic mode using FULL fertilizer catalog
   // Generates 3 profiles: Economic, Balanced, Complete
   const handleIAGrowerOptimize = async () => {
     setOptimizing(true);
@@ -1399,8 +1507,17 @@ export default function FertiIrrigationCalculator() {
         setOptimizing(false);
         return;
       }
+
+      const negativeDeltaNutrients = getNegativeStageDeltas();
+      if (negativeDeltaNutrients.length > 0) {
+        setError(`La curva de extracción es inválida: la etapa actual tiene porcentajes menores en ${negativeDeltaNutrients.join(', ')}. Corrige la curva o selecciona otra etapa.`);
+        setOptimizing(false);
+        return;
+      }
       
       const payload = buildOptimizationPayload();
+      const optimizationDeficits = getOptimizationDeficits(payload);
+      const optimizationMicroDeficits = getOptimizationMicroDeficits(payload);
       
       // Build water analysis data for acid recommendation
       const selectedWater = getSelectedWater();
@@ -1416,22 +1533,8 @@ export default function FertiIrrigationCalculator() {
       
       // Build AI payload - AUTOMATIC MODE: empty array = use FULL catalog
       const aiPayload = {
-        deficits: {
-          N: payload.deficit.n_kg_ha || 0,
-          P2O5: payload.deficit.p2o5_kg_ha || 0,
-          K2O: payload.deficit.k2o_kg_ha || 0,
-          Ca: payload.deficit.ca_kg_ha || 0,
-          Mg: payload.deficit.mg_kg_ha || 0,
-          S: payload.deficit.s_kg_ha || 0
-        },
-        micro_deficits: {
-          Fe: payload.micro_deficit?.fe_g_ha || 0,
-          Mn: payload.micro_deficit?.mn_g_ha || 0,
-          Zn: payload.micro_deficit?.zn_g_ha || 0,
-          Cu: payload.micro_deficit?.cu_g_ha || 0,
-          B: payload.micro_deficit?.b_g_ha || 0,
-          Mo: payload.micro_deficit?.mo_g_ha || 0
-        },
+        deficits: optimizationDeficits,
+        micro_deficits: optimizationMicroDeficits,
         crop_name: payload.crop_name || 'Cultivo',
         growth_stage: payload.growth_stage || 'General',
         irrigation_system: 'goteo',
@@ -1440,21 +1543,22 @@ export default function FertiIrrigationCalculator() {
         selected_fertilizer_slugs: [],  // Empty = use FULL catalog (36 fertilizers)
         water_analysis: waterAnalysisData,
         water_volume_m3_ha: parseFloat(formData.irrigation_volume_m3_ha) || 50,
-        area_ha: parseFloat(formData.area_ha) || 1
+        area_ha: parseFloat(formData.area_ha) || 1,
+        traceability: buildTraceabilityPayload()
       };
       
-      console.log('[IA Grower] Optimizing with FULL catalog (automatic mode)');
-      console.log('[IA Grower] Water analysis for acid recommendation:', waterAnalysisData);
+      console.log('[Deterministic Optimizer] Optimizing with FULL catalog (automatic mode)');
+      console.log('[Deterministic Optimizer] Water analysis for acid recommendation:', waterAnalysisData);
       
       const aiRes = await api.post('/api/fertiirrigation/ai-optimize', aiPayload);
       
       if (!aiRes.success) {
-        throw new Error(aiRes.error || 'Error en la optimización con IA');
+        throw new Error(aiRes.error || 'Error en la optimización determinística');
       }
       
       const backendAcidProgram = aiRes.acid_program || null;
       if (backendAcidProgram?.recommended) {
-        console.log('[IA Grower] Backend acid recommendation:', backendAcidProgram);
+        console.log('[Deterministic Optimizer] Backend acid recommendation:', backendAcidProgram);
       }
       // Use backendAcidProgram (with cost_per_ha) if available, fallback to acidRecommendation
       const acidDataForTransform = backendAcidProgram?.recommended ? backendAcidProgram : acidRecommendation;
@@ -1482,7 +1586,7 @@ export default function FertiIrrigationCalculator() {
         const nutrientCheck = checkNutrientCoverage(selectedFertilizers);
         if (!nutrientCheck.isComplete) {
           const missingList = nutrientCheck.missing.join(', ');
-          setError(`Tu selección no incluye fertilizantes para cubrir: ${missingList}. Añade fertilizantes con estos nutrientes o usa "IA Grower Optimizer" para una selección automática completa.`);
+          setError(`Tu selección no incluye fertilizantes para cubrir: ${missingList}. Añade fertilizantes con estos nutrientes o usa el optimizador determinístico para una selección automática completa.`);
           setOptimizing(false);
           return;
         }
@@ -1494,33 +1598,29 @@ export default function FertiIrrigationCalculator() {
         setOptimizing(false);
         return;
       }
+
+      const negativeDeltaNutrients = getNegativeStageDeltas();
+      if (negativeDeltaNutrients.length > 0) {
+        setError(`La curva de extracción es inválida: la etapa actual tiene porcentajes menores en ${negativeDeltaNutrients.join(', ')}. Corrige la curva o selecciona otra etapa.`);
+        setOptimizing(false);
+        return;
+      }
       
       const payload = buildOptimizationPayload();
+      const optimizationDeficits = getOptimizationDeficits(payload);
+      const optimizationMicroDeficits = getOptimizationMicroDeficits(payload);
       
       // Build AI payload - MANUAL MODE: use only selected fertilizers
       const aiPayload = {
-        deficits: {
-          N: payload.deficit.n_kg_ha || 0,
-          P2O5: payload.deficit.p2o5_kg_ha || 0,
-          K2O: payload.deficit.k2o_kg_ha || 0,
-          Ca: payload.deficit.ca_kg_ha || 0,
-          Mg: payload.deficit.mg_kg_ha || 0,
-          S: payload.deficit.s_kg_ha || 0
-        },
-        micro_deficits: {
-          Fe: payload.micro_deficit?.fe_g_ha || 0,
-          Mn: payload.micro_deficit?.mn_g_ha || 0,
-          Zn: payload.micro_deficit?.zn_g_ha || 0,
-          Cu: payload.micro_deficit?.cu_g_ha || 0,
-          B: payload.micro_deficit?.b_g_ha || 0,
-          Mo: payload.micro_deficit?.mo_g_ha || 0
-        },
+        deficits: optimizationDeficits,
+        micro_deficits: optimizationMicroDeficits,
         crop_name: payload.crop_name || 'Cultivo',
         growth_stage: payload.growth_stage || 'General',
         irrigation_system: 'goteo',
         num_applications: payload.num_applications || 10,
         currency: userCurrency.code || 'MXN',
-        selected_fertilizer_slugs: selectedFertilizers  // Use ONLY selected fertilizers
+        selected_fertilizer_slugs: selectedFertilizers,  // Use ONLY selected fertilizers
+        traceability: buildTraceabilityPayload()
       };
       
       console.log('[Manual Optimize] Using', selectedFertilizers.length, 'selected fertilizers:', selectedFertilizers);
@@ -1528,7 +1628,7 @@ export default function FertiIrrigationCalculator() {
       const aiRes = await api.post('/api/fertiirrigation/ai-optimize', aiPayload);
       
       if (!aiRes.success) {
-        throw new Error(aiRes.error || 'Error en la optimización con IA');
+        throw new Error(aiRes.error || 'Error en la optimización determinística');
       }
       
       const backendAcidProgram = aiRes.acid_program || null;
@@ -2850,7 +2950,7 @@ export default function FertiIrrigationCalculator() {
               ) : (
                 <>
                   <Sparkles size={18} />
-                  Obtener sugerencia IA
+                  Obtener sugerencia determinística
                 </>
               )}
             </button>
@@ -3327,7 +3427,7 @@ export default function FertiIrrigationCalculator() {
                 <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#475569' }}>Este déficit real se usa para calcular fertilizantes</span>
               </div>
               <p style={{ fontSize: '0.8rem', color: '#64748b', lineHeight: 1.5 }}>
-                Tanto el modo automático (IA Grower) como el modo manual usarán estos valores para recomendar solo los fertilizantes necesarios para cubrir el déficit restante.
+                Tanto el modo automático (determinístico) como el modo manual usarán estos valores para recomendar solo los fertilizantes necesarios para cubrir el déficit restante.
               </p>
             </div>
           </>
@@ -3569,12 +3669,12 @@ export default function FertiIrrigationCalculator() {
                 <Zap className="w-8 h-8 sm:w-10 sm:h-10 text-white" />
               </div>
               <div>
-                <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-800">IA Grower Optimizer</h2>
-                <p className="text-slate-500 text-sm sm:text-base mt-1">Optimización inteligente de fertilización con IA</p>
+                <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-800">Optimizador Determinístico</h2>
+                <p className="text-slate-500 text-sm sm:text-base mt-1">Optimización determinística de fertilización basada en reglas</p>
               </div>
             </div>
             
-            {/* IA Grower Button - Primary CTA */}
+            {/* Deterministic Optimizer Button - Primary CTA */}
             <button
               onClick={handleIAGrowerOptimize}
               disabled={optimizing || hasGeneratedAIProfiles}
@@ -3614,7 +3714,7 @@ export default function FertiIrrigationCalculator() {
               ) : (
                 <>
                   <Sparkles className="w-6 h-6" />
-                  <span>Generar 3 Fórmulas con IA Grower</span>
+                  <span>Generar 3 Fórmulas Determinísticas</span>
                 </>
               )}
             </button>
@@ -3622,7 +3722,7 @@ export default function FertiIrrigationCalculator() {
             <p style={{ textAlign: 'center', color: '#64748b', fontSize: '0.875rem', marginTop: '12px' }}>
               {hasGeneratedAIProfiles 
                 ? 'Cambia los datos de entrada para generar nuevas fórmulas' 
-                : 'La IA selecciona automáticamente los mejores fertilizantes y ácidos para tu cultivo'}
+                : 'El motor determinístico selecciona automáticamente los fertilizantes y ácidos permitidos'}
             </p>
           </div>
         </div>
@@ -4309,7 +4409,7 @@ export default function FertiIrrigationCalculator() {
           </div>
           <div>
             <h3 className="wizard-results-title">Resultados de Optimización</h3>
-            <p className="wizard-results-subtitle">3 programas generados por IA Grower</p>
+            <p className="wizard-results-subtitle">3 programas generados por el motor determinístico</p>
           </div>
         </div>
         
@@ -4707,6 +4807,12 @@ export default function FertiIrrigationCalculator() {
     const fertSource = macroFerts;
     const acidData = currentProfile?.acid_treatment || r.acid_treatment;
 
+    const irrigationFrequencyDays = irrigationSuggestion?.frequency_days || formData.irrigation_frequency_days;
+    const irrigationVolumeM3Ha = irrigationSuggestion?.volume_m3_ha || formData.irrigation_volume_m3_ha;
+    const irrigationApplications = stageDurationDays && irrigationFrequencyDays
+      ? Math.ceil(stageDurationDays / irrigationFrequencyDays)
+      : (irrigationSuggestion?.num_applications || numApplications);
+
     const fertPerApp = fertSource.map(f => ({
       name: f.fertilizer_name || f.name,
       dose: ((f.dose_kg_ha || f.total_dose || 0) / numApplications).toFixed(2)
@@ -4806,7 +4912,7 @@ export default function FertiIrrigationCalculator() {
             </div>
           </div>
 
-          {/* Profile Selector Tabs - Only show in automatic mode (IA Grower) */}
+          {/* Profile Selector Tabs - Only show in automatic mode (deterministic) */}
           {optimizationResult?.profiles && !isManualMode && (
             <div style={{
               background: 'rgba(255,255,255,0.1)',
@@ -4987,6 +5093,57 @@ export default function FertiIrrigationCalculator() {
                 {numApplications}
               </div>
               <div style={{ fontSize: '0.75rem', color: '#1e40af' }}>riegos programados</div>
+            </div>
+          </div>
+        </div>
+
+        {/* ===== IRRIGATION RESULTS ===== */}
+        <div style={{ marginBottom: '28px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
+            <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: 'linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Droplets size={18} color="white" />
+            </div>
+            <div>
+              <h3 style={{ fontSize: '1.1rem', fontWeight: '700', color: '#1e3a5f', margin: 0 }}>
+                Resultados de Riego
+              </h3>
+              <p style={{ fontSize: '0.8rem', color: '#64748b', margin: 0 }}>
+                Recomendación y parámetros para la etapa seleccionada
+              </p>
+            </div>
+          </div>
+          <div className="wizard-panel" style={{ marginBottom: '0' }}>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)',
+              gap: '12px'
+            }}>
+              <div style={{ padding: '12px', borderRadius: '12px', background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                <div style={{ fontSize: '0.75rem', color: '#1e40af', fontWeight: 600, marginBottom: '6px' }}>Frecuencia de riego</div>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700, color: '#1e3a5f' }}>
+                  {irrigationFrequencyDays ? `${irrigationFrequencyDays} días` : '—'}
+                </div>
+              </div>
+              <div style={{ padding: '12px', borderRadius: '12px', background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                <div style={{ fontSize: '0.75rem', color: '#1e40af', fontWeight: 600, marginBottom: '6px' }}>Volumen por riego</div>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700, color: '#1e3a5f' }}>
+                  {irrigationVolumeM3Ha ? `${irrigationVolumeM3Ha} m³/ha` : '—'}
+                </div>
+              </div>
+              <div style={{ padding: '12px', borderRadius: '12px', background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                <div style={{ fontSize: '0.75rem', color: '#1e40af', fontWeight: 600, marginBottom: '6px' }}>Riegos recomendados</div>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700, color: '#1e3a5f' }}>
+                  {irrigationApplications || '—'}
+                </div>
+                {stageDurationDays && irrigationFrequencyDays && (
+                  <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '4px' }}>
+                    ({stageDurationDays} días ÷ {irrigationFrequencyDays} días)
+                  </div>
+                )}
+              </div>
+            </div>
+            <div style={{ marginTop: '12px', fontSize: '0.8rem', color: '#475569' }}>
+              Duración de etapa: <strong>{stageDurationDays ? `${stageDurationDays} días` : 'No definida'}</strong>
             </div>
           </div>
         </div>

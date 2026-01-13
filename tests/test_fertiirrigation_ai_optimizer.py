@@ -9,11 +9,13 @@ Tests the following critical behaviors:
 5. normalize_coverage() handles deficit=0 with stage-specific thresholds
 """
 import pytest
-from unittest.mock import patch, MagicMock
 from app.services.fertiirrigation_ai_optimizer import (
     enforce_hard_constraints,
     normalize_coverage,
     adjust_deficits_for_acid_nitrogen,
+    optimize_with_ai,
+    optimize_deterministic,
+    recommend_acids_for_fertiirrigation,
     is_fertilizer_in_set,
     normalize_stage,
     cap_fertilizers_by_nutrient,
@@ -24,6 +26,7 @@ from app.services.fertiirrigation_ai_optimizer import (
     SULFATE_FERTILIZERS,
     LOW_S_DEFICIT_THRESHOLD
 )
+from app.services.fertiirrigation_rules import MIN_LIEBIG_COVERAGE
 
 
 # =============================================================================
@@ -365,14 +368,110 @@ def test_is_fertilizer_in_set():
 
 def test_optimize_with_ai_respects_deficit_zero():
     """
-    Integration test: optimize_with_ai should not recommend K-centered 
+    Integration test: optimize_with_ai should not recommend K-centered
     fertilizers when K2O deficit = 0.
-    
-    This test requires mocking the OpenAI API call.
     """
-    # This would require mocking openai_client.chat.completions.create
-    # For now, we test the post-processing functions above
-    pass
+    deficits = {
+        'N': 50,
+        'P2O5': 20,
+        'K2O': 0,
+        'Ca': 0,
+        'Mg': 0,
+        'S': 0
+    }
+    micro_deficits = {'Fe': 0, 'Mn': 0, 'Zn': 0, 'Cu': 0, 'B': 0, 'Mo': 0}
+    fertilizers = [
+        {'id': 'urea', 'name': 'Urea', 'n_pct': 46, 'p2o5_pct': 0, 'k2o_pct': 0, 'ca_pct': 0, 'mg_pct': 0, 's_pct': 0, 'price_per_kg': 10},
+        {'id': 'potassium_chloride', 'name': 'Cloruro de Potasio (KCl)', 'n_pct': 0, 'p2o5_pct': 0, 'k2o_pct': 60, 'ca_pct': 0, 'mg_pct': 0, 's_pct': 0, 'price_per_kg': 8},
+    ]
+
+    result = optimize_with_ai(
+        deficits=deficits,
+        micro_deficits=micro_deficits,
+        available_fertilizers=fertilizers,
+        crop_name="Tomate",
+        growth_stage="vegetative",
+        irrigation_system="goteo",
+        num_applications=1,
+        is_manual_mode=False,
+        agronomic_context=None
+    )
+
+    assert result["success"] is True
+    profiles = result.get("profiles", {})
+    for profile in profiles.values():
+        fert_ids = [f.get("id") for f in profile.get("fertilizers", [])]
+        assert "potassium_chloride" not in fert_ids
+
+
+def test_optimize_deterministic_deficit_zero_coverage_zero():
+    """Deterministic optimizer should return zero coverage when deficits are zero."""
+    deficits = {'N': 0, 'P2O5': 0, 'K2O': 0, 'Ca': 0, 'Mg': 0, 'S': 0}
+    micro_deficits = {'Fe': 0, 'Mn': 0, 'Zn': 0, 'Cu': 0, 'B': 0, 'Mo': 0}
+    fertilizers = [
+        {'id': 'urea', 'name': 'Urea', 'n_pct': 46, 'p2o5_pct': 0, 'k2o_pct': 0, 'ca_pct': 0, 'mg_pct': 0, 's_pct': 0, 'price_per_kg': 10}
+    ]
+
+    result = optimize_deterministic(
+        deficits=deficits,
+        micro_deficits=micro_deficits,
+        available_fertilizers=fertilizers,
+        crop_name="Tomate",
+        growth_stage="vegetative",
+        irrigation_system="goteo",
+        num_applications=1
+    )
+
+    for profile in result.get("profiles", {}).values():
+        assert all(value == 0 for value in profile.get("coverage", {}).values())
+
+
+def test_liebig_minimum_enforced_when_sources_available():
+    """Coverage for nutrients with deficit should meet Liebig minimum when sources exist."""
+    deficits = {'N': 10, 'P2O5': 10, 'K2O': 0, 'Ca': 0, 'Mg': 0, 'S': 0}
+    micro_deficits = {'Fe': 0, 'Mn': 0, 'Zn': 0, 'Cu': 0, 'B': 0, 'Mo': 0}
+    fertilizers = [
+        {'id': 'urea', 'name': 'Urea', 'n_pct': 46, 'p2o5_pct': 0, 'k2o_pct': 0, 'ca_pct': 0, 'mg_pct': 0, 's_pct': 0, 'price_per_kg': 10},
+        {'id': 'map', 'name': 'MAP', 'n_pct': 12, 'p2o5_pct': 61, 'k2o_pct': 0, 'ca_pct': 0, 'mg_pct': 0, 's_pct': 0, 'price_per_kg': 20}
+    ]
+
+    result = optimize_deterministic(
+        deficits=deficits,
+        micro_deficits=micro_deficits,
+        available_fertilizers=fertilizers,
+        crop_name="Tomate",
+        growth_stage="vegetative",
+        irrigation_system="goteo",
+        num_applications=1
+    )
+
+    for profile in result.get("profiles", {}).values():
+        coverage = profile.get("coverage", {})
+        assert coverage.get("N", 0) >= MIN_LIEBIG_COVERAGE * 100
+        assert coverage.get("P2O5", 0) >= MIN_LIEBIG_COVERAGE * 100
+
+
+def test_acid_selection_uses_cheapest_option():
+    """Acid selection should prefer the cheapest acid that meets constraints."""
+    water_analysis = {'hco3_meq_l': 2.0}
+    deficits = {'N': 10, 'P2O5': 10, 'K2O': 0, 'Ca': 0, 'Mg': 0, 'S': 10}
+    user_prices = {
+        'nitric_acid': 10.0,
+        'phosphoric_acid': 40.0,
+        'sulfuric_acid': 30.0
+    }
+
+    result = recommend_acids_for_fertiirrigation(
+        water_analysis=water_analysis,
+        deficits=deficits,
+        water_volume_m3_ha=50,
+        num_applications=1,
+        area_ha=1.0,
+        user_prices=user_prices
+    )
+
+    assert result['recommended'] is True
+    assert result['acids'][0]['acid_id'] == 'nitric_acid'
 
 
 # =============================================================================

@@ -8,8 +8,12 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import json
+import pytest
 from datetime import datetime
 from typing import Dict, List, Any
+
+pytest.importorskip("reportlab")
+
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle

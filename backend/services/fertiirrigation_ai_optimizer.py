@@ -1,21 +1,32 @@
 """
-FertiIrrigation AI Optimizer Service - Simple GPT-based optimization.
+FertiIrrigation Optimizer Service - Deterministic optimization engine.
 
-This service replaces the complex algorithmic optimizer with direct GPT-4 calls.
-It sends the nutrient deficits and available fertilizers to GPT, which generates
-3 optimization profiles: Economic, Balanced, and Complete.
+This service calculates fertilization profiles using explicit agronomic rules,
+greedy search, and hard constraints. It produces deterministic Economic,
+Balanced, and Complete profiles with reproducible coverage and cost outputs.
 
 CRITICAL RULES:
 - ONLY cover nutrients with deficit > 0
-- Apply hard agronomic constraints post-GPT (e.g., no KCl if Cl- > 2 meq/L)
+- Apply hard agronomic constraints (e.g., no KCl if Cl- > 2 meq/L)
 - Handle deficit=0 cases with max allowed thresholds per growth stage
 """
 import json
-import os
 import logging
 import math
 from typing import Dict, List, Any, Optional, Tuple
-from openai import OpenAI
+
+from app.services.fertiirrigation_rules import (
+    MIN_LIEBIG_COVERAGE,
+    PROFILE_MIN_COVERAGE,
+    MAX_COVERAGE_LIMIT,
+    LIEBIG_OVERRIDE_MAX,
+    TARGET_NEUTRALIZATION_PCT,
+    MIN_HCO3_FOR_ACID,
+    MAX_NUTRIENT_COVERAGE_PCT,
+    ACID_NUTRIENT_COVERAGE_THRESHOLD,
+    ACID_HARD_EXCLUDE_THRESHOLD,
+    LOW_S_DEFICIT_THRESHOLD
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +34,6 @@ logger = logging.getLogger(__name__)
 class SulfurCapError(Exception):
     """Raised when sulfur cannot be capped to the required threshold."""
     pass
-
-AI_INTEGRATIONS_OPENAI_API_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
-AI_INTEGRATIONS_OPENAI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
-
-openai_client = OpenAI(
-    api_key=AI_INTEGRATIONS_OPENAI_API_KEY,
-    base_url=AI_INTEGRATIONS_OPENAI_BASE_URL
-)
 
 # =============================================================================
 # CONSTANTS: Agronomic thresholds and fertilizer classifications
@@ -79,9 +82,6 @@ SULFATE_FERTILIZERS = {
     'copper_sulfate', 'cuso4', 'sulfato_de_cobre', 'sulfato_cobre',
     'manganese_sulfate', 'mnso4', 'sulfato_de_manganeso', 'sulfato_manganeso'
 }
-
-# Threshold below which S deficit is considered "low" - sulfates should be restricted
-LOW_S_DEFICIT_THRESHOLD = 5.0  # kg/ha
 
 # Growth stage normalization
 STAGE_MAPPING = {
@@ -168,10 +168,6 @@ ACID_CATALOG = {
         'safety_max_ml_per_1000L': 300
     }
 }
-
-TARGET_NEUTRALIZATION_PCT = 0.70
-MIN_HCO3_FOR_ACID = 0.5
-MAX_NUTRIENT_COVERAGE_PCT = 1.15  # 115% maximum coverage from acid
 
 
 def calculate_max_acid_dose_by_nutrient_limit(
@@ -300,7 +296,7 @@ def recommend_acids_for_fertiirrigation(
     Principles:
     1. No nutrient from acids can exceed 115% of its deficit
     2. Use multiple acids (up to 3) if needed to complete neutralization
-    3. Prioritize acids by nutrient utility (deficit / projected contribution)
+    3. Select the cheapest acid (cost per meq) that meets constraints
     4. Track cumulative contributions and update deficits after each selection
     """
     hco3_meq = (
@@ -373,22 +369,13 @@ def recommend_acids_for_fertiirrigation(
                 acid_id, actual_dose, water_volume_m3_ha, num_applications, area_ha
             )
             
-            contribution_value = contributions.get(nutrient_key, 0)
-            
-            if original_deficit > 0 and contribution_value > 0:
-                utility_ratio = original_deficit / contribution_value
-            else:
-                utility_ratio = 0.1
-            
             meq_neutralized = actual_dose * acid_info['meq_per_ml'] / 1000
             
             price_per_L = (user_prices or {}).get(acid_id, acid_info['default_price_per_L'])
             water_per_ha_1000L = water_volume_m3_ha * num_applications
             volume_L_per_ha = (actual_dose / 1000) * water_per_ha_1000L
-            
-            cost_efficiency = meq_neutralized / (volume_L_per_ha * price_per_L + 0.01)
-            
-            score = utility_ratio * 10 + cost_efficiency * 5
+            total_cost_per_ha = volume_L_per_ha * price_per_L
+            cost_per_meq = (total_cost_per_ha / meq_neutralized) if meq_neutralized > 0 else float("inf")
             
             candidates.append({
                 'acid_id': acid_id,
@@ -400,8 +387,8 @@ def recommend_acids_for_fertiirrigation(
                 'contributions': contributions,
                 'meq_neutralized': meq_neutralized,
                 'nutrient_key': nutrient_key,
-                'utility_ratio': utility_ratio,
-                'score': score,
+                'cost_per_meq': cost_per_meq,
+                'total_cost_per_ha': total_cost_per_ha,
                 'is_nutrient_limited': actual_dose < dose_for_full_neutralization
             })
         
@@ -413,7 +400,7 @@ def recommend_acids_for_fertiirrigation(
                 )
             break
         
-        candidates.sort(key=lambda x: x['score'], reverse=True)
+        candidates.sort(key=lambda x: (x['cost_per_meq'], x['acid_id']))
         best = candidates[0]
         
         acid_info = ACID_CATALOG[best['acid_id']]
@@ -506,18 +493,6 @@ def normalize_stage(stage: str) -> str:
 # =============================================================================
 # ACID-AWARE FERTILIZER CONSTRAINTS
 # =============================================================================
-
-ACID_NUTRIENT_COVERAGE_THRESHOLD = 0.80  # 80% coverage triggers preference for alternatives
-ACID_HARD_EXCLUDE_THRESHOLD = 1.00  # 100% coverage = hard exclude fertilizers with that nutrient
-
-SULFATE_FERTILIZERS = [
-    'sulfato_de_magnesio', 'magnesium_sulfate', 'epsom_salt', 'sal_de_epsom',
-    'sulfato_de_potasio', 'potassium_sulfate', 'sop',
-    'sulfato_de_amonio', 'ammonium_sulfate',
-    'sulfato_de_zinc', 'zinc_sulfate',
-    'sulfato_de_manganeso', 'manganese_sulfate',
-    'sulfato_de_cobre', 'copper_sulfate',
-]
 
 NITRATE_ALTERNATIVES = {
     'sulfato_de_magnesio': 'nitrato_de_magnesio',
@@ -1079,7 +1054,7 @@ def apply_ion_constraints(
     num_applications: int = 10
 ) -> Dict:
     """
-    Apply ionic constraints to a fertilizer profile post-GPT.
+    Apply ionic constraints to a fertilizer profile post-optimization.
     
     Enforcement steps (deterministic, max 10 iterations):
     1. Remove fertilizers in hard_bans
@@ -1306,7 +1281,7 @@ def apply_ion_constraints(
 
 def format_constraints_for_prompt(constraints: Dict[str, Any]) -> str:
     """
-    Format ion constraints for inclusion in GPT prompt.
+    Format ion constraints for inclusion in deterministic summaries.
     
     Returns a string to append to the system prompt.
     """
@@ -2253,7 +2228,7 @@ def enforce_hard_constraints(
     growth_stage: str = 'default'
 ) -> Dict:
     """
-    Enforce hard agronomic constraints POST-GPT.
+    Enforce hard agronomic constraints post-optimization.
     
     Removes or zeros out fertilizers that violate:
     1. K-centered fertilizers when K2O deficit = 0
@@ -2698,7 +2673,7 @@ def calculate_acid_n_contribution(acid_data: Optional[Dict] = None) -> float:
 def adjust_deficits_for_acid_nitrogen(
     deficits: Dict[str, float],
     acid_data: Optional[Dict] = None
-) -> tuple:
+) -> Dict[str, float]:
     """
     Subtract N contributed by nitric acid from deficits.
     
@@ -2710,7 +2685,7 @@ def adjust_deficits_for_acid_nitrogen(
     Then we calculate N contribution and subtract from deficit.
     
     Returns:
-        tuple: (adjusted_deficits, acid_n_kg_ha)
+        Dict[str, float]: Adjusted deficits after nitric acid N contribution.
     """
     adjusted = deficits.copy()
     n_from_acid_kg = calculate_acid_n_contribution(acid_data)
@@ -2720,7 +2695,7 @@ def adjust_deficits_for_acid_nitrogen(
         adjusted['N'] = max(0, original_n - n_from_acid_kg)
         logger.info(f"[AcidN] HNO3 contributes {n_from_acid_kg:.2f} kg N/ha. Deficit N: {original_n:.1f} -> {adjusted['N']:.1f} kg/ha")
     
-    return adjusted, n_from_acid_kg
+    return adjusted
 
 
 def _optimize_manual_mode(
@@ -2737,238 +2712,22 @@ def _optimize_manual_mode(
     agronomic_context: Optional[Dict] = None
 ) -> Dict[str, Any]:
     """
-    Manual mode optimization - generates a SINGLE program using ALL selected fertilizers.
-    User has manually selected these fertilizers, so we MUST use them all.
-    Handles incompatibilities via A/B tank separation.
-    
-    NEW: Respects deficit=0 rule - won't force coverage for nutrients with no deficit.
+    Manual mode optimization using deterministic rules only.
+
+    This path assumes the fertilizer list is already filtered to the user's
+    selected products and returns deterministic profiles.
     """
-    
-    # Build deficit-aware instructions
-    deficit_instructions = []
-    for nut in ['N', 'P2O5', 'K2O', 'Ca', 'Mg', 'S']:
-        d = deficits.get(nut, 0)
-        if d > 0:
-            deficit_instructions.append(f"- {nut}: Cubrir {d:.1f} kg/ha (déficit REAL)")
-        else:
-            deficit_instructions.append(f"- {nut}: NO APLICAR (déficit = 0, no hay necesidad)")
-    
-    deficit_guidance = "\n".join(deficit_instructions)
-    
-    prompt = f"""Eres un experto agrónomo en fertirrigación. El usuario ha SELECCIONADO MANUALMENTE los siguientes fertilizantes.
-
-## REGLA MAESTRA CRÍTICA
-**SOLO debes cubrir nutrientes con DÉFICIT > 0.**
-- Si un nutriente tiene déficit = 0, NO uses fertilizantes cuya función principal sea ese nutriente.
-- Ejemplo: Si K2O = 0, NO incluyas KCl, KNO3, SOP aunque estén disponibles.
-
-## DATOS DEL CULTIVO
-- Cultivo: {crop_name}
-- Etapa fenológica: {growth_stage}
-- Sistema de riego: {irrigation_system}
-- Número de aplicaciones: {num_applications}
-
-## INSTRUCCIONES POR NUTRIENTE (OBLIGATORIO)
-{deficit_guidance}
-
-## DÉFICITS DE MACRONUTRIENTES (kg/ha TOTALES)
-| Nutriente | Déficit | Acción |
-|-----------|---------|--------|
-| N | {deficits.get('N', 0):.1f} | {'Cubrir' if deficits.get('N', 0) > 0 else 'NO APLICAR'} |
-| P₂O₅ | {deficits.get('P2O5', 0):.1f} | {'Cubrir' if deficits.get('P2O5', 0) > 0 else 'NO APLICAR'} |
-| K₂O | {deficits.get('K2O', 0):.1f} | {'Cubrir' if deficits.get('K2O', 0) > 0 else 'NO APLICAR'} |
-| Ca | {deficits.get('Ca', 0):.1f} | {'Cubrir' if deficits.get('Ca', 0) > 0 else 'NO APLICAR'} |
-| Mg | {deficits.get('Mg', 0):.1f} | {'Cubrir' if deficits.get('Mg', 0) > 0 else 'NO APLICAR'} |
-| S | {deficits.get('S', 0):.1f} | {'Cubrir' if deficits.get('S', 0) > 0 else 'NO APLICAR'} |
-
-## DÉFICITS DE MICRONUTRIENTES (g/ha)
-| Micronutriente | Déficit |
-|----------------|---------|
-| Fe | {micro_deficits.get('Fe', 0):.1f} |
-| Mn | {micro_deficits.get('Mn', 0):.1f} |
-| Zn | {micro_deficits.get('Zn', 0):.1f} |
-| Cu | {micro_deficits.get('Cu', 0):.1f} |
-| B | {micro_deficits.get('B', 0):.1f} |
-| Mo | {micro_deficits.get('Mo', 0):.1f} |
-
-## FERTILIZANTES SELECCIONADOS POR EL USUARIO
-{fertilizers_text}
-
-## INSTRUCCIONES OBLIGATORIAS
-
-### 1. REGLA DE DÉFICIT = 0
-- Si déficit de un nutriente = 0, la dosis de fertilizantes centrados en ese nutriente debe ser 0 o mínima.
-- Cobertura objetivo para déficit = 0: máximo 5 kg/ha de ese nutriente (tolerancia por aporte secundario).
-
-### 2. COBERTURA PARA DÉFICITS > 0
-- DEBES lograr cobertura 95-110% en nutrientes con déficit > 0.
-- Si el usuario seleccionó fertilizantes para ese nutriente, úsalos.
-
-### 3. MANEJO DE INCOMPATIBILIDADES CON TANQUES A/B
-- **Tanque A**: Sulfatos, fosfatos
-- **Tanque B**: Nitratos de calcio/magnesio
-
-### 4. CÁLCULO DE DOSIS
-- dose_per_application = dose_kg_ha / {num_applications}
-
-## FORMATO DE RESPUESTA (JSON ESTRICTO)
-{{
-  "economic": null,
-  "balanced": {{
-    "fertilizers": [
-      {{"id": "fertilizer_id", "name": "Nombre", "dose_kg_ha": 45.5, "dose_per_application": 4.55, "tank": "A"}}
-    ],
-    "coverage": {{"N": 100, "P2O5": 100, "K2O": 0, "Ca": 100, "Mg": 0, "S": 95}},
-    "notes": "Programa manual. Déficit K2O=0 y Mg=0: no se aplicaron fuentes de K ni Mg."
-  }},
-  "complete": null
-}}
-
-IMPORTANTE: 
-- Si déficit = 0 para un nutriente, su cobertura en el JSON debe reflejar 0% o "N/A".
-- NUNCA propongas dosis > 0 de fertilizantes K-centrados si K2O déficit = 0.
-"""
-
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "Eres un experto agrónomo. SOLO cubre nutrientes con déficit > 0. Responde SOLO en JSON válido."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"},
-            max_tokens=4096,
-            temperature=0.2
-        )
-        
-        result_text = response.choices[0].message.content
-        result = json.loads(result_text)
-        
-        if 'balanced' in result and result['balanced']:
-            # Apply hard constraints post-GPT
-            result['balanced'] = enforce_hard_constraints(
-                result['balanced'],
-                deficits,
-                agronomic_context,
-                available_fertilizers,
-                growth_stage
-            )
-            
-            result['balanced'] = calculate_costs_for_profile(
-                result['balanced'], 
-                price_map, 
-                name_to_id
-            )
-            result['balanced']['profile_name'] = 'Tu Programa'
-            
-            # Normalize coverage with deficit-aware logic
-            result['balanced'] = normalize_coverage(
-                result['balanced'],
-                deficits,
-                available_fertilizers,
-                max_coverage_pct=110,
-                num_applications=num_applications,
-                min_coverage=95,
-                growth_stage=growth_stage
-            )
-            
-            total_cost = sum(f.get('subtotal', 0) for f in result['balanced'].get('fertilizers', []))
-            result['balanced']['total_cost_per_ha'] = total_cost
-            
-            # Validation: check for under-coverage
-            nutrient_to_pct_key = {
-                'N': 'n_pct', 'P2O5': 'p2o5_pct', 'K2O': 'k2o_pct',
-                'Ca': 'ca_pct', 'Mg': 'mg_pct', 'S': 's_pct'
-            }
-            
-            post_norm_coverage = result['balanced'].get('coverage', {})
-            failed_nutrients = []
-            for nutrient, pct_key in nutrient_to_pct_key.items():
-                deficit = deficits.get(nutrient, 0)
-                cov = post_norm_coverage.get(nutrient, 0)
-                has_fert = any(f.get(pct_key, 0) > 0 for f in available_fertilizers)
-                if deficit > 0 and cov < 90 and has_fert:
-                    failed_nutrients.append(f"{nutrient}:{round(cov)}%")
-            
-            if failed_nutrients:
-                logger.warning(f"Manual mode GPT-4o coverage insufficient: {failed_nutrients}")
-                
-                # Generate helpful suggestions for which fertilizers to add
-                suggestions = []
-                for failed in failed_nutrients:
-                    nut = failed.split(':')[0]
-                    pct_key = nutrient_to_pct_key.get(nut)
-                    
-                    # Find fertilizers that could cover this nutrient
-                    good_sources = []
-                    for fert in available_fertilizers:
-                        content = fert.get(pct_key, 0)
-                        if content >= 10:  # At least 10% of nutrient
-                            fert_name = fert.get('name', fert.get('id', ''))
-                            if 'acid' not in fert.get('id', '').lower():
-                                good_sources.append(f"{fert_name} ({content}% {nut})")
-                    
-                    if good_sources and len(good_sources) <= 5:
-                        suggestions.append(f"{nut}: considere agregar {', '.join(good_sources[:3])}")
-                    elif not any(f.get(pct_key, 0) > 0 for f in available_fertilizers):
-                        suggestions.append(f"{nut}: no hay fertilizantes disponibles con este nutriente en su selección")
-                
-                # Build error message with suggestions
-                if suggestions:
-                    suggestion_text = " Sugerencias: " + "; ".join(suggestions)
-                    error_msg = f"No se logró cobertura ≥80% para: {', '.join(failed_nutrients)}. Los fertilizantes seleccionados no pueden cubrir completamente estos nutrientes.{suggestion_text}"
-                else:
-                    error_msg = f"No se logró cobertura ≥80% para: {', '.join(failed_nutrients)}. Los fertilizantes seleccionados no contienen suficientes fuentes de estos nutrientes."
-                
-                logger.error(f"Manual mode FAILED: {failed_nutrients}")
-                return {
-                    "success": False,
-                    "error": error_msg,
-                    "failed_nutrients": failed_nutrients,
-                    "suggestions": suggestions if suggestions else None,
-                    "model_used": "gpt-4o",
-                    "mode": "manual"
-                }
-            
-            # Check for over-coverage
-            exceeding = result['balanced'].get('coverage_exceeds_max', [])
-            if exceeding:
-                error_msg = f"La cobertura excede 110% para: {', '.join(exceeding)}. Retire o sustituya algunos fertilizantes."
-                logger.error(f"Manual mode FAILED: Coverage exceeds 110%: {exceeding}")
-                return {
-                    "success": False,
-                    "error": error_msg,
-                    "exceeding_nutrients": exceeding,
-                    "model_used": "gpt-4o",
-                    "mode": "manual"
-                }
-        
-        if not result.get('economic'):
-            result['economic'] = None
-        if not result.get('complete'):
-            result['complete'] = None
-        
-        return {
-            "success": True,
-            "profiles": result,
-            "model_used": "gpt-4o",
-            "mode": "manual"
-        }
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing GPT response (manual mode): {e}")
-        return {
-            "success": False,
-            "error": "Error al procesar la respuesta del modelo",
-            "profiles": None
-        }
-    except Exception as e:
-        logger.error(f"Error in manual mode AI optimization: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "profiles": None
-        }
+    logger.info("[ManualMode] Running deterministic optimization for manual selection.")
+    return optimize_deterministic(
+        deficits=deficits,
+        micro_deficits=micro_deficits,
+        available_fertilizers=available_fertilizers,
+        crop_name=crop_name,
+        growth_stage=growth_stage,
+        irrigation_system=irrigation_system,
+        num_applications=num_applications,
+        agronomic_context=agronomic_context
+    )
 
 
 def optimize_with_ai(
@@ -2984,8 +2743,8 @@ def optimize_with_ai(
     acid_data: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
-    Generate 3 fertilization recommendations using GPT-4.
-    
+    Generate 3 fertilization recommendations using deterministic optimization.
+
     Args:
         deficits: Macronutrient deficits in kg/ha (N, P2O5, K2O, Ca, Mg, S)
         micro_deficits: Micronutrient deficits in g/ha (Fe, Mn, Zn, Cu, B, Mo)
@@ -3006,332 +2765,44 @@ def optimize_with_ai(
                 "dose_ml_per_1000L": 0.5,
                 "water_volume_m3_ha": 5000
             }
-    
+
     Returns:
         Dict with economic, balanced, and complete profiles
     """
-    
-    # Adjust deficits for acid nitrogen if applicable
-    adjusted_deficits, acid_n_contribution = adjust_deficits_for_acid_nitrogen(deficits, acid_data)
-    
-    # Determine if acid is recommended but N contribution couldn't be calculated
-    # This happens when acid_type is provided but dose or volume is missing/zero
-    acid_recommended_no_volume = False
-    if acid_data and acid_data.get('acid_type'):
-        acid_type_valid = acid_data.get('acid_type', '').lower() in ['nitric', 'hno3', 'nitrico', 'ácido nítrico', 'acido nitrico']
-        dose_missing = not acid_data.get('dose_ml_per_1000L') or acid_data.get('dose_ml_per_1000L', 0) <= 0
-        volume_missing = not acid_data.get('water_volume_m3_ha') or acid_data.get('water_volume_m3_ha', 0) <= 0
-        acid_recommended_no_volume = acid_type_valid and acid_n_contribution == 0 and (dose_missing or volume_missing)
-    
-    fertilizers_text, price_map, name_to_id = build_fertilizers_context(available_fertilizers)
-    
-    # Build ion constraints for enforcement
-    ion_constraints = build_ion_constraints(
-        agronomic_context=agronomic_context,
-        crop_name=crop_name,
-        growth_stage=growth_stage,
-        deficits=adjusted_deficits,
-        max_coverage_pct=110
-    )
-    logger.info(f"[optimize_with_ai] Ion constraints built: {len(ion_constraints.get('hard_bans', []))} bans, "
-                f"{len(ion_constraints.get('warnings', []))} warnings")
-    
+    logger.info("[DeterministicAICompat] Routing optimize_with_ai to deterministic optimizer.")
+
+    water_volume = 50.0
+    if acid_data and acid_data.get("water_volume_m3_ha"):
+        water_volume = acid_data.get("water_volume_m3_ha") or water_volume
+
     if is_manual_mode:
         return _optimize_manual_mode(
-            adjusted_deficits, micro_deficits, available_fertilizers,
-            crop_name, growth_stage, irrigation_system, num_applications,
-            fertilizers_text, price_map, name_to_id, agronomic_context
+            deficits=deficits,
+            micro_deficits=micro_deficits,
+            available_fertilizers=available_fertilizers,
+            crop_name=crop_name,
+            growth_stage=growth_stage,
+            irrigation_system=irrigation_system,
+            num_applications=num_applications,
+            fertilizers_text="",
+            price_map={},
+            name_to_id={},
+            agronomic_context=agronomic_context
         )
-    
-    # Build deficit-aware fertilizer list with restrictions
-    deficit_aware_ferts = build_deficit_aware_fertilizer_list(
-        available_fertilizers, adjusted_deficits, agronomic_context
+
+    return optimize_deterministic(
+        deficits=deficits,
+        micro_deficits=micro_deficits,
+        available_fertilizers=available_fertilizers,
+        crop_name=crop_name,
+        growth_stage=growth_stage,
+        irrigation_system=irrigation_system,
+        num_applications=num_applications,
+        agronomic_context=agronomic_context,
+        acid_data=acid_data,
+        water_volume_m3_ha=water_volume,
+        area_ha=1.0
     )
-    
-    # Build nutrient instructions based on actual deficits
-    nutrient_instructions = []
-    for nut in ['N', 'P2O5', 'K2O', 'Ca', 'Mg', 'S']:
-        d = adjusted_deficits.get(nut, 0)
-        if d > 0:
-            nutrient_instructions.append(f"- **{nut}**: Déficit {d:.1f} kg/ha → CUBRIR 95-110%")
-        else:
-            nutrient_instructions.append(f"- **{nut}**: Déficit 0 → NO APLICAR fertilizantes centrados en {nut}")
-    
-    nutrient_guidance = "\n".join(nutrient_instructions)
-    
-    prompt = f"""Eres un experto agrónomo en fertirrigación con 20+ años de experiencia.
-
-## REGLA MAESTRA (OBLIGATORIA)
-**SOLO CUBRE NUTRIENTES CON DÉFICIT > 0.**
-- Si un nutriente tiene déficit = 0, NO uses fertilizantes cuya función principal sea ese nutriente.
-- Fertilizantes como KCl, KNO3, SOP son "K-centrados" → si K2O déficit = 0, NO los uses.
-- Fertilizantes como MgSO4 son "Mg-centrados" → si Mg déficit = 0, NO los uses.
-- La cobertura objetivo para déficit = 0 es 0% (tolerancia máx 5 kg/ha por aporte secundario).
-
-## DATOS DEL CULTIVO
-- Cultivo: {crop_name}
-- Etapa fenológica: {growth_stage}
-- Sistema de riego: {irrigation_system}
-- Número de aplicaciones: {num_applications}
-
-## GUÍA DE NUTRIENTES (RESPETA ESTRICTAMENTE)
-{nutrient_guidance}
-
-## DÉFICITS DE MACRONUTRIENTES (kg/ha TOTALES)
-| Nutriente | Déficit | Acción Obligatoria |
-|-----------|---------|-------------------|
-| N | {adjusted_deficits.get('N', 0):.1f} | {'CUBRIR 95-110%' if adjusted_deficits.get('N', 0) > 0 else '⛔ NO APLICAR'} |
-| P₂O₅ | {adjusted_deficits.get('P2O5', 0):.1f} | {'CUBRIR 95-110%' if adjusted_deficits.get('P2O5', 0) > 0 else '⛔ NO APLICAR'} |
-| K₂O | {adjusted_deficits.get('K2O', 0):.1f} | {'CUBRIR 95-110%' if adjusted_deficits.get('K2O', 0) > 0 else '⛔ NO APLICAR'} |
-| Ca | {adjusted_deficits.get('Ca', 0):.1f} | {'CUBRIR 95-110%' if adjusted_deficits.get('Ca', 0) > 0 else '⛔ NO APLICAR'} |
-| Mg | {adjusted_deficits.get('Mg', 0):.1f} | {'CUBRIR 95-110%' if adjusted_deficits.get('Mg', 0) > 0 else '⛔ NO APLICAR'} |
-| S | {adjusted_deficits.get('S', 0):.1f} | {'CUBRIR 95-110%' if adjusted_deficits.get('S', 0) > 0 else '⛔ NO APLICAR'} |
-
-## DÉFICITS DE MICRONUTRIENTES (g/ha)
-| Micro | Déficit |
-|-------|---------|
-| Fe | {micro_deficits.get('Fe', 0):.1f} |
-| Mn | {micro_deficits.get('Mn', 0):.1f} |
-| Zn | {micro_deficits.get('Zn', 0):.1f} |
-| Cu | {micro_deficits.get('Cu', 0):.1f} |
-| B | {micro_deficits.get('B', 0):.1f} |
-| Mo | {micro_deficits.get('Mo', 0):.1f} |
-
-## FERTILIZANTES DISPONIBLES (con restricciones)
-{deficit_aware_ferts}
-
-**IMPORTANTE**: Los fertilizantes marcados con ⛔ NO deben usarse.
-
-## PERFILES DE OPTIMIZACIÓN
-
-### 1. ECONÓMICO
-- Minimiza costo para nutrientes CON DÉFICIT > 0.
-- Prioriza multi-nutrientes de bajo costo.
-- Cubre 95-110% de nutrientes con déficit > 0.
-- NO incluyas micronutrientes.
-- Si un macronutriente tiene déficit = 0, su cobertura debe ser 0.
-
-### 2. BALANCEADO
-- Mejor relación costo-beneficio.
-- Cubre 95-110% de TODOS los nutrientes CON DÉFICIT > 0.
-- Si déficit = 0, no aplicar ese nutriente.
-- Incluye micronutrientes básicos solo si déficit > 0.
-
-### 3. COMPLETO
-- Máxima precisión para nutrientes CON DÉFICIT > 0.
-- Cobertura exacta 100% donde hay déficit.
-- Incluye TODOS los micronutrientes con déficit > 0.
-- Si déficit = 0, cobertura = 0.
-
-## REGLAS AGRONÓMICAS
-1. **Solubilidad**: SOLO fertilizantes 100% solubles para goteo.
-2. **Compatibilidad**: No mezclar sulfatos/fosfatos con calcio.
-3. **LÍMITE MÁXIMO**: NUNCA exceder 110% de cobertura.
-4. **DÉFICIT=0**: NUNCA aplicar fertilizantes centrados en un nutriente si su déficit = 0.
-5. **REGLA ANTI-SULFATOS (CRÍTICA)**: Si el déficit de S es bajo (< 5 kg/ha), EVITA usar sulfatos (sulfato de amonio, MgSO4, SOP) como fuentes principales. Prioriza NITRATOS para cubrir N/Ca/Mg. Solo usa sulfatos si no hay alternativa Y siempre que S total ≤ 110% del déficit.
-
-## RESTRICCIONES IÓNICAS (OBLIGATORIAS)
-{format_constraints_for_prompt(ion_constraints)}
-
-## FORMATO JSON (ESTRICTO)
-{{
-  "economic": {{
-    "fertilizers": [{{"id": "id", "name": "Nombre", "dose_kg_ha": 45.5, "dose_per_application": 4.55}}],
-    "coverage": {{"N": 100, "P2O5": 98, "K2O": 0, "Ca": 0, "Mg": 0, "S": 95}},
-    "notes": "Fórmula económica. K2O/Ca/Mg sin déficit: no se aplicaron."
-  }},
-  "balanced": {{...}},
-  "complete": {{...}}
-}}
-"""
-
-    try:
-        response = openai_client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "Eres un experto agrónomo. SOLO cubre nutrientes con déficit > 0. Si déficit = 0, la cobertura debe ser 0. Responde SOLO en JSON válido."},
-                {"role": "user", "content": prompt}
-            ],
-            response_format={"type": "json_object"},
-            max_tokens=4096,
-            temperature=0.3
-        )
-        
-        result_text = response.choices[0].message.content
-        result = json.loads(result_text)
-        
-        profiles_with_exceeding = []
-        
-        for profile_key in ['economic', 'balanced', 'complete']:
-            if profile_key in result and result[profile_key]:
-                # Apply hard constraints FIRST
-                result[profile_key] = enforce_hard_constraints(
-                    result[profile_key],
-                    adjusted_deficits,
-                    agronomic_context,
-                    available_fertilizers,
-                    growth_stage
-                )
-                
-                # Apply ion constraints (before normalize)
-                result[profile_key] = apply_ion_constraints(
-                    result[profile_key],
-                    ion_constraints,
-                    adjusted_deficits,
-                    available_fertilizers,
-                    num_applications
-                )
-                logger.info(f"[optimize_with_ai] Applied ion constraints to {profile_key} profile")
-                
-                # Then normalize coverage
-                result[profile_key] = normalize_coverage(
-                    result[profile_key],
-                    adjusted_deficits,
-                    available_fertilizers,
-                    max_coverage_pct=110,
-                    num_applications=num_applications,
-                    min_coverage=90,
-                    growth_stage=growth_stage
-                )
-                
-                # Calculate costs
-                result[profile_key] = calculate_costs_for_profile(
-                    result[profile_key], 
-                    price_map, 
-                    name_to_id
-                )
-                
-                result[profile_key]['profile_name'] = {
-                    'economic': 'Económico',
-                    'balanced': 'Balanceado', 
-                    'complete': 'Completo'
-                }[profile_key]
-                
-                # Add acid N contribution info
-                result[profile_key]['acid_n_contribution_kg_ha'] = acid_n_contribution
-                result[profile_key]['acid_recommended'] = acid_recommended_no_volume
-                
-                # Add explainability notes
-                explain_notes = build_explainability_notes(
-                    adjusted_deficits, agronomic_context, crop_name, growth_stage, result[profile_key]
-                )
-                if explain_notes:
-                    existing_notes = result[profile_key].get('notes', '') or ''
-                    result[profile_key]['notes'] = (existing_notes + " " + explain_notes).strip()
-                
-                # Add coverage_explained for UI
-                result[profile_key]['coverage_explained'] = build_coverage_explained(
-                    result[profile_key], adjusted_deficits, agronomic_context, growth_stage
-                )
-                
-                # Add profile targets for validation reference
-                profile_targets = get_profile_targets(
-                    crop_name, growth_stage, agronomic_context, adjusted_deficits, profile_key
-                )
-                result[profile_key]['coverage_targets'] = profile_targets
-                
-                logger.info(f"[optimize_with_ai] Added explainability to {profile_key} profile")
-                
-                # Check if coverage couldn't be normalized
-                exceeding = result[profile_key].get('coverage_exceeds_max', [])
-                if exceeding:
-                    profiles_with_exceeding.append((profile_key, exceeding))
-                    logger.warning(f"Automatic mode: Profile {profile_key} has nutrients exceeding 110%: {exceeding}")
-        
-        # If any profile exceeds 110%, try additional S cap BEFORE hard-failing
-        if profiles_with_exceeding:
-            logger.warning(f"[AutoMode] Profiles exceeding 110%: {profiles_with_exceeding}. Attempting S cap rescue...")
-            
-            rescued_profiles = []
-            for profile_key, exceeding_list in profiles_with_exceeding:
-                # Check if S is the problem
-                s_exceeding = [e for e in exceeding_list if e.startswith('S:')]
-                if s_exceeding and result.get(profile_key):
-                    logger.info(f"[AutoMode] Applying aggressive S cap to {profile_key}")
-                    # Apply aggressive S cap
-                    result[profile_key] = cap_fertilizers_by_nutrient(
-                        result[profile_key],
-                        adjusted_deficits,
-                        available_fertilizers,
-                        max_coverage_pct=110,
-                        nutrient='S',
-                        num_applications=num_applications
-                    )
-                    
-                    # Recalculate coverage to check if fixed
-                    result[profile_key] = normalize_coverage(
-                        result[profile_key],
-                        adjusted_deficits,
-                        available_fertilizers,
-                        max_coverage_pct=110,
-                        num_applications=num_applications,
-                        min_coverage=85,  # Lower min to allow more reduction
-                        growth_stage=growth_stage
-                    )
-                    
-                    result[profile_key] = calculate_costs_for_profile(
-                        result[profile_key],
-                        price_map,
-                        name_to_id
-                    )
-                    
-                    new_exceeding = result[profile_key].get('coverage_exceeds_max', [])
-                    if not new_exceeding:
-                        logger.info(f"[AutoMode] Successfully rescued {profile_key} via S cap")
-                        rescued_profiles.append(profile_key)
-                    else:
-                        logger.warning(f"[AutoMode] S cap rescue failed for {profile_key}: still exceeding {new_exceeding}")
-            
-            # Re-check which profiles still exceed
-            still_exceeding = []
-            for profile_key in ['economic', 'balanced', 'complete']:
-                if profile_key in result and result[profile_key]:
-                    exceeding = result[profile_key].get('coverage_exceeds_max', [])
-                    if exceeding:
-                        still_exceeding.append((profile_key, exceeding))
-            
-            if still_exceeding:
-                failed_details = "; ".join([f"{k}: {v}" for k, v in still_exceeding])
-                
-                # Check if the issue is S with no S-free alternatives in catalog
-                s_issues = [p for p, e in still_exceeding if any('S:' in x for x in e)]
-                if s_issues:
-                    error_msg = f"El sistema no pudo generar recomendaciones con cobertura S ≤110%. El catálogo de fertilizantes no tiene suficientes fuentes de N sin S (urea, nitrato de amonio, nitrato de calcio). Perfiles afectados: {failed_details}. Agregue fuentes sin S al catálogo o permita menor cobertura."
-                else:
-                    error_msg = f"El sistema no pudo generar recomendaciones con cobertura ≤110%. Perfiles afectados: {failed_details}."
-                
-                logger.error(f"Automatic mode FAILED after S cap rescue: {failed_details}")
-                return {
-                    "success": False,
-                    "error": error_msg,
-                    "profiles": result,
-                    "model_used": "gpt-4o",
-                    "mode": "automatic",
-                    "rescue_attempted": True,
-                    "rescued_profiles": rescued_profiles
-                }
-        
-        return {
-            "success": True,
-            "profiles": result,
-            "model_used": "gpt-4o",
-            "adjusted_deficits": adjusted_deficits  # Include for transparency
-        }
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Error parsing GPT response: {e}")
-        return {
-            "success": False,
-            "error": "Error al procesar la respuesta del modelo",
-            "profiles": None
-        }
-    except Exception as e:
-        logger.error(f"Error in AI optimization: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "profiles": None
-        }
 
 
 # =============================================================================
@@ -3446,6 +2917,10 @@ def get_available_fertilizers_for_user(db, user_id: int, currency: str = "MXN") 
         _HYDRO_FERTILIZERS_CACHE = _load_hydro_fertilizers_catalog()
     
     hydro_by_id = {f['id']: f for f in _HYDRO_FERTILIZERS_CACHE}
+
+    if not visible_ids:
+        visible_ids = set(hydro_by_id.keys())
+        logger.warning("[Fallback] visible_ids vacío, usando catálogo hydro completo")
     
     user_prices = db.query(UserFertilizerPrice).filter(
         UserFertilizerPrice.user_id == user_id,
@@ -3453,11 +2928,38 @@ def get_available_fertilizers_for_user(db, user_id: int, currency: str = "MXN") 
     ).all()
     user_price_kg_map = {p.fertilizer_id: p.price_per_kg for p in user_prices if p.price_per_kg}
     user_price_liter_map = {p.fertilizer_id: p.price_per_liter for p in user_prices if p.price_per_liter}
+
+    active_my_fertilizers = set()
+    try:
+        from app.models.database_models import FertilizerProduct
+        active_products = db.query(FertilizerProduct).filter(
+            FertilizerProduct.is_active == True
+        ).all()
+        active_my_fertilizers.update({p.slug for p in active_products if p.slug})
+    except Exception:
+        active_my_fertilizers = set()
+
+    custom_ferts = db.query(UserCustomFertilizer).filter(
+        UserCustomFertilizer.user_id == user_id,
+        UserCustomFertilizer.is_active == True
+    ).all()
+    custom_slugs = {f"custom_{cf.id}" for cf in custom_ferts}
+    active_my_fertilizers.update(custom_slugs)
+
+    active_price_ids = set(visible_ids)
+    active_price_ids.update(user_price_kg_map.keys())
+    active_price_ids.update(user_price_liter_map.keys())
+
+    allowed_ids = active_price_ids.intersection(active_my_fertilizers)
+    if not allowed_ids:
+        allowed_ids = set(visible_ids)
     
     result = []
     seen_slugs = set()
     
     for fert_id in visible_ids:
+        if fert_id not in allowed_ids:
+            continue
         if fert_id in seen_slugs:
             continue
         seen_slugs.add(fert_id)
@@ -3465,12 +2967,15 @@ def get_available_fertilizers_for_user(db, user_id: int, currency: str = "MXN") 
         hydro_fert = hydro_by_id.get(fert_id)
         
         if hydro_fert:
-            n_pct = hydro_fert.get('n_pct', 0)
-            p2o5_pct = hydro_fert.get('p2o5_pct', 0)
-            k2o_pct = hydro_fert.get('k2o_pct', 0)
-            ca_pct = hydro_fert.get('ca_pct', 0)
-            mg_pct = hydro_fert.get('mg_pct', 0)
-            s_pct = hydro_fert.get('s_pct', 0)
+            nutrient_comp = hydro_fert.get('nutrient_composition', {}) or {}
+            n_pct = nutrient_comp.get('N_percent', 0) or 0
+            p_elem = nutrient_comp.get('P_percent', 0) or 0
+            k_elem = nutrient_comp.get('K_percent', 0) or 0
+            p2o5_pct = p_elem * 2.29
+            k2o_pct = k_elem * 1.2047
+            ca_pct = nutrient_comp.get('Ca_percent', 0) or 0
+            mg_pct = nutrient_comp.get('Mg_percent', 0) or 0
+            s_pct = nutrient_comp.get('S_percent', 0) or 0
             fert_name = hydro_fert.get('name', fert_id)
             fert_type = hydro_fert.get('type', 'salt')
             stock_tank = hydro_fert.get('stock_tank', 'B')
@@ -3551,13 +3056,10 @@ def get_available_fertilizers_for_user(db, user_id: int, currency: str = "MXN") 
             'form': form
         })
     
-    custom_ferts = db.query(UserCustomFertilizer).filter(
-        UserCustomFertilizer.user_id == user_id,
-        UserCustomFertilizer.is_active == True
-    ).all()
-    
     for cf in custom_ferts:
         cf_slug = f"custom_{cf.id}"
+        if cf_slug not in allowed_ids:
+            continue
         if cf_slug not in seen_slugs:
             seen_slugs.add(cf_slug)
             
@@ -3617,21 +3119,16 @@ def get_available_fertilizers_for_user(db, user_id: int, currency: str = "MXN") 
 # =============================================================================
 # DETERMINISTIC FERTIIRRIGATION OPTIMIZER
 # =============================================================================
-# Replaces GPT-4 calls with a deterministic greedy iterative algorithm.
+# Deterministic greedy iterative algorithm.
 # Based on agronomic rules and cost-efficiency scoring.
 # =============================================================================
 
 NUTRIENT_PRIORITY = ['N', 'K2O', 'P2O5', 'Ca', 'Mg', 'S']
 MICRO_NUTRIENTS = ['Fe', 'Mn', 'Zn', 'Cu', 'B', 'Mo']
 
-MIN_COVERAGE_TARGET = 0.95
-MAX_COVERAGE_LIMIT = 1.15
-
-LIEBIG_OVERRIDE_MAX = 1.20
-
 PROFILE_CONFIGS = {
     'economic': {
-        'min_coverage': 0.80,
+        'min_coverage': PROFILE_MIN_COVERAGE['economic'],
         'max_coverage': MAX_COVERAGE_LIMIT,
         'max_fertilizers': 5,
         'profile_name': 'Económico',
@@ -3645,7 +3142,7 @@ PROFILE_CONFIGS = {
         'allow_liebig_override': True
     },
     'balanced': {
-        'min_coverage': 0.90,
+        'min_coverage': PROFILE_MIN_COVERAGE['balanced'],
         'max_coverage': MAX_COVERAGE_LIMIT,
         'max_fertilizers': 6,
         'profile_name': 'Balanceado',
@@ -3659,7 +3156,7 @@ PROFILE_CONFIGS = {
         'allow_liebig_override': True
     },
     'complete': {
-        'min_coverage': MIN_COVERAGE_TARGET,
+        'min_coverage': PROFILE_MIN_COVERAGE['complete'],
         'max_coverage': MAX_COVERAGE_LIMIT,
         'max_fertilizers': 10,
         'profile_name': 'Completo',
@@ -4052,8 +3549,14 @@ def _optimize_profile(
     acid_constraints: Optional[Dict] = None
 ) -> Dict[str, Any]:
     """
-    Generate a single optimization profile using greedy iterative algorithm.
-    
+    Generate a single optimization profile using a deterministic greedy algorithm.
+
+    ORDEN DE PRIORIDADES (determinístico):
+    1) Ley de Liebig (≥80% todos los nutrientes con déficit)
+    2) Cobertura mínima por perfil (económico/balanceado/completo)
+    3) Minimizar costo total
+    4) Minimizar sobrecoberturas (>120%) cuando sea necesario
+
     ESTRATEGIA MEJORADA:
     1. FASE 1 - Carriers escasos: Priorizar nutrientes con pocas opciones de carriers (ej: Mg)
     2. FASE 2 - Loop greedy: Seleccionar fertilizantes costo-eficientes
@@ -4197,6 +3700,18 @@ def _optimize_profile(
         current_coverage = _calculate_coverage(deficits, remaining_deficits)
         if current_coverage.get(scarce_nutrient, 0) >= min_coverage * 100:
             continue
+
+        needs_multi = [
+            n for n in NUTRIENT_PRIORITY
+            if n != scarce_nutrient
+            and deficits.get(n, 0) > 0
+            and current_coverage.get(n, 0) < (min_coverage * 100)
+        ]
+        has_multi_for_target = any(
+            _get_nutrient_content(f, scarce_nutrient) > 0
+            and any(_get_nutrient_content(f, n) > 0 for n in needs_multi)
+            for f in available
+        )
         
         best_carrier = None
         best_score = float('inf')
@@ -4225,6 +3740,13 @@ def _optimize_profile(
             
             price = fert.get('price_per_kg', 25.0) or 25.0
             score = (price * dose) / target_delta
+
+            if needs_multi:
+                provides_other = any(_get_nutrient_content(fert, n) > 0 for n in needs_multi)
+                if has_multi_for_target and not provides_other:
+                    continue
+                if provides_other:
+                    score = score * 0.7
             
             acid_penalty = fert.get('acid_penalty', 1.0)
             acid_boost = fert.get('acid_boost', 1.0)
@@ -4467,7 +3989,7 @@ def _optimize_profile(
     
     current_coverage = _calculate_coverage(deficits, remaining_deficits)
     
-    liebig_threshold = 80.0
+    liebig_threshold = MIN_LIEBIG_COVERAGE * 100
     rescue_nutrients = [
         n for n in NUTRIENT_PRIORITY
         if deficits.get(n, 0) > 0 and current_coverage.get(n, 0) < liebig_threshold
@@ -4616,12 +4138,13 @@ def optimize_deterministic(
     acid_data: Optional[Dict[str, Any]] = None,
     water_volume_m3_ha: float = 50.0,
     area_ha: float = 1.0,
-    user_acid_prices: Optional[Dict[str, float]] = None
+    user_acid_prices: Optional[Dict[str, float]] = None,
+    traceability_context: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Generate 3 fertilization profiles using deterministic greedy algorithm.
     
-    Replaces GPT-4 calls with a rule-based approach that:
+    Rule-based approach that:
     1. Recommends acids for bicarbonate neutralization (with nutrient contribution)
     2. Scores fertilizers by cost per kg of deficit coverage
     3. Iteratively selects best fertilizers until coverage targets are met
@@ -4670,7 +4193,7 @@ def optimize_deterministic(
             logger.info(f"[DeterministicOptimizer] Adjusted deficits after acid: {adjusted_deficits}")
     
     if not acid_recommendation and acid_data:
-        adjusted_deficits, _ = adjust_deficits_for_acid_nitrogen(deficits, acid_data)
+        adjusted_deficits = adjust_deficits_for_acid_nitrogen(deficits, acid_data)
     
     result = {}
     
@@ -4781,6 +4304,20 @@ def optimize_deterministic(
         if acid_constraints.get('warnings'):
             logger.info(f"[DeterministicOptimizer] Acid constraints: {acid_constraints['warnings']}")
     
+    base_traceability = {
+        'requirements': (traceability_context or {}).get('requirements'),
+        'soil_contribution': (traceability_context or {}).get('soil_contribution'),
+        'water_contribution': (traceability_context or {}).get('water_contribution'),
+        'acid_contribution': (traceability_context or {}).get('acid_contribution') or acid_contribs,
+        'deficit_net': (traceability_context or {}).get('deficit_net') or adjusted_deficits,
+        'deficit_input': deficits,
+        'micro_deficit_input': micro_deficits,
+        'water_analysis': (traceability_context or {}).get('water_analysis') or (agronomic_context or {}).get('water'),
+        'area_ha': area_ha,
+        'water_volume_m3_ha': water_volume_m3_ha,
+        'num_applications': num_applications
+    }
+
     for profile_key in ['economic', 'balanced', 'complete']:
         config = PROFILE_CONFIGS[profile_key]
         min_coverage = config['min_coverage']
@@ -4807,6 +4344,7 @@ def optimize_deterministic(
         profile['coverage_explained'] = build_coverage_explained(
             profile, adjusted_deficits, agronomic_context, growth_stage
         )
+        profile['traceability'] = base_traceability
         
         if not profile.get('coverage_met', True):
             failed_nutrients = profile.get('failed_nutrients', [])

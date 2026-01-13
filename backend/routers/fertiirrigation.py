@@ -10,6 +10,7 @@ from sqlalchemy import desc
 import io
 import json
 import logging
+import math
 import re
 
 from app.database import get_db
@@ -277,118 +278,42 @@ async def get_irrigation_suggestion(
     current_user: User = Depends(get_current_active_user),
 ):
     """
-    Get AI-suggested irrigation parameters based on soil texture and crop phenological stage.
-    Uses GPT-4 to provide agronomically sound recommendations.
+    Get deterministic irrigation parameters based on soil texture and crop stage.
     """
-    from openai import OpenAI
-    import os
-    
-    try:
-        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-        
-        system_prompt = """Eres un experto agrónomo especializado en manejo de riego y fertirrigación.
-Tu tarea es recomendar parámetros de riego para UNA ETAPA FENOLÓGICA ESPECÍFICA, basándote en:
-1. La textura del suelo (afecta capacidad de retención de agua y drenaje)
-2. El cultivo y su etapa fenológica (afecta demanda hídrica)
-3. El sistema de riego (eficiencia de aplicación)
-4. El % de absorción de nutrientes en esta etapa (indica intensidad de la demanda)
+    texture = (request.soil_texture or "").lower()
+    extraction_pct = request.extraction_percent or 0
+    stage_days = request.stage_duration_days or 0
 
-IMPORTANTE: El número de aplicaciones es para ESTA ETAPA FENOLÓGICA, no para todo el ciclo del cultivo.
+    texture_frequency = {
+        "arenoso": 2,
+        "franco": 4,
+        "franco-arenoso": 3,
+        "franco-arcilloso": 5,
+        "arcilloso": 7
+    }
+    base_frequency = texture_frequency.get(texture, 4)
+    frequency_days = max(1, min(14, base_frequency))
 
-REGLAS:
-- Frecuencia de riego: 1-14 días (suelos arenosos = más frecuente, arcillosos = menos frecuente)
-- Volumen por riego: 5-120 m³/ha (considerar textura y etapa)
-- Número de aplicaciones: 4-30 para esta etapa (proporcional al % de absorción de la etapa)
+    volume_base = 20 + (extraction_pct / 100) * 60
+    volume_texture_adjust = 5 if "arenoso" in texture else (-5 if "arcilloso" in texture else 0)
+    volume_m3_ha = max(5, min(120, round(volume_base + volume_texture_adjust, 1)))
 
-Debes responder ÚNICAMENTE con un objeto JSON válido, sin texto adicional:
-{
-  "frequency_days": <número entero 1-14>,
-  "volume_m3_ha": <número decimal 5-120>,
-  "num_applications": <número entero 4-30 para esta etapa>,
-  "rationale": "<explicación breve en español de por qué recomiendas estos valores para ESTA ETAPA>"
-}"""
+    if stage_days > 0:
+        num_applications = max(4, min(30, math.ceil(stage_days / frequency_days)))
+    else:
+        num_applications = max(4, min(30, round(4 + (extraction_pct / 100) * 26)))
 
-        extraction_info = ""
-        if request.extraction_percent:
-            extraction_info = f"\n- Absorción acumulada en esta etapa: {request.extraction_percent:.0f}% del total del ciclo"
-        
-        duration_info = ""
-        if request.stage_duration_days:
-            duration_info = f"\n- Duración de esta etapa: {request.stage_duration_days} días"
+    rationale = (
+        "Parámetros calculados de forma determinística según textura del suelo, "
+        "porcentaje de extracción y duración de la etapa."
+    )
 
-        user_prompt = f"""Recomienda parámetros de riego para ESTA ETAPA FENOLÓGICA:
-- Textura del suelo: {request.soil_texture}
-- Cultivo: {request.crop_name}
-- Etapa fenológica: {request.phenological_stage or 'No especificada'}
-- Sistema de riego: {request.irrigation_system}{extraction_info}{duration_info}
-
-IMPORTANTE: Si la etapa dura N días y recomiendas regar cada X días, el número de aplicaciones = N / X (redondeado hacia arriba).
-Por ejemplo: 30 días de etapa ÷ 3 días de frecuencia = 10 aplicaciones.
-Responde solo con el JSON."""
-
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3,
-            max_tokens=500
-        )
-        
-        content = response.choices[0].message.content.strip()
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-        
-        import json as json_module
-        import math
-        result = json_module.loads(content)
-        
-        frequency = max(1, min(14, int(result.get("frequency_days", 7))))
-        volume = max(5, min(120, float(result.get("volume_m3_ha", 50))))
-        
-        # Enforce stage-duration coherence: recalculate applications from duration if available
-        if request.stage_duration_days and request.stage_duration_days > 0:
-            num_apps = max(4, min(30, math.ceil(request.stage_duration_days / frequency)))
-        else:
-            num_apps = max(4, min(30, int(result.get("num_applications", 10))))
-        
-        return IrrigationSuggestionResponse(
-            frequency_days=frequency,
-            volume_m3_ha=volume,
-            num_applications=num_apps,
-            rationale=result.get("rationale", "Valores sugeridos para esta etapa fenológica.")
-        )
-        
-    except Exception as e:
-        logger.error(f"Error getting irrigation suggestion: {e}")
-        texture_lower = request.soil_texture.lower()
-        if "aren" in texture_lower:
-            freq, vol = 2, 30
-        elif "arcill" in texture_lower:
-            freq, vol = 5, 60
-        else:
-            freq, vol = 3, 45
-        
-        # Calculate applications based on stage duration if available
-        import math
-        if request.stage_duration_days and request.stage_duration_days > 0:
-            base_apps = max(4, min(30, math.ceil(request.stage_duration_days / freq)))
-        elif request.extraction_percent:
-            # Fallback: Scale applications proportionally to extraction
-            base_apps = max(4, min(30, int(request.extraction_percent / 100 * 30)))
-        else:
-            base_apps = 10
-        
-        return IrrigationSuggestionResponse(
-            frequency_days=freq,
-            volume_m3_ha=vol,
-            num_applications=base_apps,
-            rationale=f"Valores predeterminados para suelo {request.soil_texture} en esta etapa. La IA no está disponible en este momento."
-        )
+    return IrrigationSuggestionResponse(
+        frequency_days=frequency_days,
+        volume_m3_ha=volume_m3_ha,
+        num_applications=num_applications,
+        rationale=rationale
+    )
 
 
 class MicroRequirements(BaseModel):
@@ -420,6 +345,9 @@ class NutrientContributionsRequest(BaseModel):
     acid_treatment: Optional[AcidContributionData] = None  # Acid contribution data
     extraction_crop_id: Optional[str] = None  # Crop ID for agronomic minimums (e.g., 'tomato', 'maize')
     extraction_stage_id: Optional[str] = None  # Stage ID for stage-specific minimums (e.g., 'seedling', 'flowering')
+    previous_stage_id: Optional[str] = None  # Previous stage ID for DELTA extraction calculation
+    custom_extraction_percent: Optional[Dict[str, float]] = None  # Custom stage extraction percentages
+    crop_name: Optional[str] = None  # Optional crop name for soil factors
 
 
 class EfficiencyDetail(BaseModel):
@@ -496,13 +424,51 @@ async def calculate_nutrient_contributions(
             WaterAnalysis.user_id == current_user.id
         ).first()
     
+    crop_name_for_factors = request.crop_name
+    stage_pct_by_nutrient = None
+    if request.custom_extraction_percent:
+        stage_pct_by_nutrient = request.custom_extraction_percent
+    elif request.extraction_crop_id and request.extraction_stage_id:
+        current_curve = fertiirrigation_calculator.get_extraction_curve(
+            request.extraction_crop_id,
+            request.extraction_stage_id
+        )
+        if request.previous_stage_id:
+            prev_curve = fertiirrigation_calculator.get_extraction_curve(
+                request.extraction_crop_id,
+                request.previous_stage_id
+            )
+        else:
+            prev_curve = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
+        stage_pct_by_nutrient = {
+            "N": current_curve.get("N", 0) - prev_curve.get("N", 0),
+            "P2O5": current_curve.get("P2O5", 0) - prev_curve.get("P2O5", 0),
+            "K2O": current_curve.get("K2O", 0) - prev_curve.get("K2O", 0),
+            "Ca": current_curve.get("Ca", 0) - prev_curve.get("Ca", 0),
+            "Mg": current_curve.get("Mg", 0) - prev_curve.get("Mg", 0),
+            "S": current_curve.get("S", 0) - prev_curve.get("S", 0),
+        }
+
+    if stage_pct_by_nutrient:
+        for nutrient_key, pct in stage_pct_by_nutrient.items():
+            if pct < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta negativo para {nutrient_key}."
+                )
+            if pct > 100:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta > 100% para {nutrient_key}."
+                )
+
     if soil_analysis:
         soil_data = soil_model_to_data(soil_analysis)
-        crop_name_for_factors = getattr(request, 'crop_name', None) or getattr(getattr(request, 'crop', None), 'crop_name', None)
         soil_contribution = fertiirrigation_calculator.calculate_adjusted_soil_availability(
-            soil_data, 
+            soil_data,
             stage_extraction_pct=request.stage_extraction_pct,
-            crop_name=crop_name_for_factors
+            crop_name=crop_name_for_factors,
+            stage_extraction_pct_by_nutrient=stage_pct_by_nutrient
         )
         
         bulk_density = soil_analysis.bulk_density or 1.3
@@ -510,7 +476,10 @@ async def calculate_nutrient_contributions(
         ppm_to_g_ha = bulk_density * depth_cm * 0.1 * 1000
         
         stage_factor = 1.0
-        if request.stage_extraction_pct is not None and request.stage_extraction_pct > 0:
+        if stage_pct_by_nutrient:
+            avg_stage = sum(stage_pct_by_nutrient.values()) / len(stage_pct_by_nutrient)
+            stage_factor = min(1.0, max(0.0, avg_stage / 100.0))
+        elif request.stage_extraction_pct is not None and request.stage_extraction_pct > 0:
             stage_factor = min(1.0, request.stage_extraction_pct / 100.0)
         
         micro_soil_contribution = {
@@ -544,7 +513,7 @@ async def calculate_nutrient_contributions(
             "Mo": 0.0
         }
     
-    requirements = {
+    base_requirements = {
         "N": request.requirements.get("n_kg_ha", 0.0),
         "P2O5": request.requirements.get("p2o5_kg_ha", 0.0),
         "K2O": request.requirements.get("k2o_kg_ha", 0.0),
@@ -552,6 +521,33 @@ async def calculate_nutrient_contributions(
         "Mg": request.requirements.get("mg_kg_ha", 0.0),
         "S": request.requirements.get("s_kg_ha", 0.0)
     }
+
+    if request.custom_extraction_percent:
+        requirements = {
+            nutrient: base_requirements.get(nutrient, 0) * (request.custom_extraction_percent.get(nutrient, 0) / 100)
+            for nutrient in base_requirements
+        }
+    elif request.extraction_crop_id and request.extraction_stage_id:
+        crop_data = CropData(
+            name=request.crop_name or "Cultivo",
+            n_kg_ha=base_requirements.get("N", 0),
+            p2o5_kg_ha=base_requirements.get("P2O5", 0),
+            k2o_kg_ha=base_requirements.get("K2O", 0),
+            ca_kg_ha=base_requirements.get("Ca", 0),
+            mg_kg_ha=base_requirements.get("Mg", 0),
+            s_kg_ha=base_requirements.get("S", 0),
+            extraction_crop_id=request.extraction_crop_id,
+            extraction_stage_id=request.extraction_stage_id,
+            previous_stage_id=request.previous_stage_id
+        )
+        requirements = fertiirrigation_calculator.calculate_stage_requirements(
+            crop_data,
+            request.extraction_crop_id,
+            request.extraction_stage_id,
+            previous_stage=request.previous_stage_id
+        )
+    else:
+        requirements = base_requirements
     
     micro_req = request.micro_requirements or MicroRequirements()
     micro_requirements = {
@@ -691,6 +687,7 @@ async def calculate_nutrient_contributions(
         "• Esuelo: Disponibilidad del nutriente desde el suelo (40-85%)\n"
         "• Eagua: Disponibilidad del nutriente desde el agua (50-95%)\n"
         "• Pseguridad: Porcentaje mínimo obligatorio (5-15%)\n\n"
+        "El déficit base representa el déficit fisiológico real.\n"
         "El déficit final SIEMPRE será al menos el mínimo de seguridad,\n"
         "garantizando aporte nutricional incluso cuando suelo y agua\n"
         "cubran el requerimiento teórico."
@@ -707,7 +704,7 @@ async def calculate_nutrient_contributions(
         safety_percentages={k: round(v * 100, 1) for k, v in safety_percentages.items()},
         efficiency_details=efficiency_details,
         technical_note=technical_note,
-        real_deficit=deficit_final,
+        real_deficit=deficit_base,
         agronomic_minimums=deficit_seguridad,
         micro_requirements={k: round(v, 2) for k, v in micro_requirements.items()},
         micro_soil_contribution={k: round(v, 2) for k, v in micro_soil_contribution.items()},
@@ -780,6 +777,39 @@ async def calculate_fertiirrigation(
         previous_stage_id=request.crop.previous_stage_id,
         custom_extraction_percent=request.crop.custom_extraction_percent,
     )
+
+    if crop_data.custom_extraction_percent:
+        for nutrient_key, pct in crop_data.custom_extraction_percent.items():
+            if pct < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta negativo para {nutrient_key}."
+                )
+            if pct > 100:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta > 100% para {nutrient_key}."
+                )
+
+    if crop_data.extraction_crop_id and crop_data.extraction_stage_id:
+        current_curve = fertiirrigation_calculator.get_extraction_curve(
+            crop_data.extraction_crop_id,
+            crop_data.extraction_stage_id
+        )
+        if crop_data.previous_stage_id:
+            prev_curve = fertiirrigation_calculator.get_extraction_curve(
+                crop_data.extraction_crop_id,
+                crop_data.previous_stage_id
+            )
+        else:
+            prev_curve = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
+        for nutrient_key in ["N", "P2O5", "K2O", "Ca", "Mg", "S"]:
+            delta = current_curve.get(nutrient_key, 0) - prev_curve.get(nutrient_key, 0)
+            if delta < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta negativo para {nutrient_key}."
+                )
     
     irrigation_data = IrrigationData(
         system=request.irrigation.irrigation_system or "goteo",
@@ -807,9 +837,9 @@ async def calculate_fertiirrigation(
     if crop_data.extraction_crop_id and crop_data.previous_stage_id:
         stages = fertiirrigation_calculator.get_crop_stages(crop_data.extraction_crop_id)
         prev_stage = next((s for s in stages if s.get("id") == crop_data.previous_stage_id), None)
-        if prev_stage and prev_stage.get("extraction_percent"):
+        if prev_stage and prev_stage.get("cumulative_percent"):
             # Previous stage's cumulative percentage (average of all nutrients)
-            pct = prev_stage["extraction_percent"]
+            pct = prev_stage["cumulative_percent"]
             if isinstance(pct, dict):
                 values = [v for v in pct.values() if isinstance(v, (int, float))]
                 previous_cumulative_pct = sum(values) / len(values) if values else None
@@ -1234,6 +1264,7 @@ class OptimizeRequest(BaseModel):
     extraction_crop_id: Optional[str] = None  # Crop ID for agronomic minimums (e.g., 'tomato', 'maize')
     extraction_stage_id: Optional[str] = None  # Stage ID for stage-specific minimums (e.g., 'seedling', 'flowering')
     previous_stage_id: Optional[str] = None  # Previous stage ID for DELTA extraction calculation
+    custom_extraction_percent: Optional[Dict[str, float]] = None  # Custom stage extraction percentages
 
 
 class FertilizerDoseResponse(BaseModel):
@@ -1332,12 +1363,82 @@ async def optimize_fertigation(
     Acid nutrient contributions are deducted from deficits before optimization.
     Soil and water contributions are deducted when analysis IDs are provided.
     """
-    n_deficit = request.deficit.get("n_kg_ha", 0)
-    p2o5_deficit = request.deficit.get("p2o5_kg_ha", 0)
-    k2o_deficit = request.deficit.get("k2o_kg_ha", 0)
-    ca_deficit = request.deficit.get("ca_kg_ha", 0)
-    mg_deficit = request.deficit.get("mg_kg_ha", 0)
-    s_deficit = request.deficit.get("s_kg_ha", 0)
+    base_requirements = {
+        "N": request.deficit.get("n_kg_ha", 0),
+        "P2O5": request.deficit.get("p2o5_kg_ha", 0),
+        "K2O": request.deficit.get("k2o_kg_ha", 0),
+        "Ca": request.deficit.get("ca_kg_ha", 0),
+        "Mg": request.deficit.get("mg_kg_ha", 0),
+        "S": request.deficit.get("s_kg_ha", 0),
+    }
+
+    stage_pct_by_nutrient = None
+    if request.custom_extraction_percent:
+        stage_pct_by_nutrient = request.custom_extraction_percent
+        stage_requirements = {
+            nutrient: base_requirements.get(nutrient, 0) * (request.custom_extraction_percent.get(nutrient, 0) / 100)
+            for nutrient in base_requirements
+        }
+    elif request.extraction_crop_id and request.extraction_stage_id:
+        current_curve = fertiirrigation_calculator.get_extraction_curve(
+            request.extraction_crop_id,
+            request.extraction_stage_id
+        )
+        if request.previous_stage_id:
+            prev_curve = fertiirrigation_calculator.get_extraction_curve(
+                request.extraction_crop_id,
+                request.previous_stage_id
+            )
+        else:
+            prev_curve = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
+        stage_pct_by_nutrient = {
+            "N": current_curve.get("N", 0) - prev_curve.get("N", 0),
+            "P2O5": current_curve.get("P2O5", 0) - prev_curve.get("P2O5", 0),
+            "K2O": current_curve.get("K2O", 0) - prev_curve.get("K2O", 0),
+            "Ca": current_curve.get("Ca", 0) - prev_curve.get("Ca", 0),
+            "Mg": current_curve.get("Mg", 0) - prev_curve.get("Mg", 0),
+            "S": current_curve.get("S", 0) - prev_curve.get("S", 0),
+        }
+        crop_data = CropData(
+            name=request.crop_name or "Cultivo",
+            n_kg_ha=base_requirements.get("N", 0),
+            p2o5_kg_ha=base_requirements.get("P2O5", 0),
+            k2o_kg_ha=base_requirements.get("K2O", 0),
+            ca_kg_ha=base_requirements.get("Ca", 0),
+            mg_kg_ha=base_requirements.get("Mg", 0),
+            s_kg_ha=base_requirements.get("S", 0),
+            extraction_crop_id=request.extraction_crop_id,
+            extraction_stage_id=request.extraction_stage_id,
+            previous_stage_id=request.previous_stage_id,
+        )
+        stage_requirements = fertiirrigation_calculator.calculate_stage_requirements(
+            crop_data,
+            request.extraction_crop_id,
+            request.extraction_stage_id,
+            previous_stage=request.previous_stage_id
+        )
+    else:
+        stage_requirements = base_requirements
+
+    if stage_pct_by_nutrient:
+        for nutrient_key, pct in stage_pct_by_nutrient.items():
+            if pct < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta negativo para {nutrient_key}."
+                )
+            if pct > 100:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Curva de extracción inválida: delta > 100% para {nutrient_key}."
+                )
+
+    n_deficit = stage_requirements.get("N", 0)
+    p2o5_deficit = stage_requirements.get("P2O5", 0)
+    k2o_deficit = stage_requirements.get("K2O", 0)
+    ca_deficit = stage_requirements.get("Ca", 0)
+    mg_deficit = stage_requirements.get("Mg", 0)
+    s_deficit = stage_requirements.get("S", 0)
     
     soil_contribution = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
     water_contribution = {"N": 0, "P2O5": 0, "K2O": 0, "Ca": 0, "Mg": 0, "S": 0}
@@ -1353,7 +1454,8 @@ async def optimize_fertigation(
             soil_contribution = fertiirrigation_calculator.calculate_adjusted_soil_availability(
                 soil_data,
                 stage_extraction_pct=request.stage_extraction_pct,
-                crop_name=crop_name_for_factors
+                crop_name=crop_name_for_factors,
+                stage_extraction_pct_by_nutrient=stage_pct_by_nutrient
             )
     
     if request.water_analysis_id:
@@ -1417,12 +1519,12 @@ async def optimize_fertigation(
     crop_minimums = get_crop_minimums(crop_id_for_minimums, stage_for_minimums)
     
     # Original requirements from request (before any deductions)
-    n_requirement = request.deficit.get("n_kg_ha", 0)
-    p2o5_requirement = request.deficit.get("p2o5_kg_ha", 0)
-    k2o_requirement = request.deficit.get("k2o_kg_ha", 0)
-    ca_requirement = request.deficit.get("ca_kg_ha", 0)
-    mg_requirement = request.deficit.get("mg_kg_ha", 0)
-    s_requirement = request.deficit.get("s_kg_ha", 0)
+    n_requirement = stage_requirements.get("N", 0)
+    p2o5_requirement = stage_requirements.get("P2O5", 0)
+    k2o_requirement = stage_requirements.get("K2O", 0)
+    ca_requirement = stage_requirements.get("Ca", 0)
+    mg_requirement = stage_requirements.get("Mg", 0)
+    s_requirement = stage_requirements.get("S", 0)
     
     # Get minimum percentages for all macronutrients
     n_min_pct = crop_minimums.get("N")
@@ -1986,6 +2088,8 @@ async def generate_fertiirrigation_pdf(
         "crop_name": calculation.crop_name,
         "area_ha": calculation.area_ha,
         "num_applications": result_data.get("num_applications", 10),
+        "irrigation_frequency_days": calculation.irrigation_frequency_days,
+        "irrigation_volume_m3_ha": calculation.irrigation_volume_m3_ha,
         "result": result_data,
         "price_map": price_map,
         "user_currency": user_currency
@@ -2007,7 +2111,8 @@ async def generate_fertiirrigation_pdf(
                 "stage_id": extraction_stage_id,
                 "crop_name": crop_info.get("name", extraction_crop_id),
                 "stage_name": stage_info.get("name", extraction_stage_id),
-                "percentages": curve_percentages
+                "percentages": curve_percentages,
+                "duration_days": stage_info.get("duration_days")
             }
     
     if calculation.soil_analysis_id:
@@ -2076,6 +2181,8 @@ async def generate_fertiirrigation_excel(
         "crop_name": calculation.crop_name,
         "area_ha": calculation.area_ha,
         "num_applications": result_data.get("num_applications", 10),
+        "irrigation_frequency_days": calculation.irrigation_frequency_days,
+        "irrigation_volume_m3_ha": calculation.irrigation_volume_m3_ha,
         "result": result_data,
         "fertilizer_program": calculation.fertilizer_program or []
     }
@@ -2097,7 +2204,8 @@ async def generate_fertiirrigation_excel(
                 "stage_id": extraction_stage_id,
                 "crop_name": crop_info.get("name", extraction_crop_id),
                 "stage_name": stage_info.get("name", extraction_stage_id),
-                "percentages": curve_percentages
+                "percentages": curve_percentages,
+                "duration_days": stage_info.get("duration_days")
             }
     
     if calculation.soil_analysis_id:
@@ -2347,6 +2455,7 @@ class AIOptimizeRequest(BaseModel):
     water_volume_m3_ha: float = 50.0
     area_ha: float = 1.0
     user_acid_prices: Optional[Dict[str, float]] = None
+    traceability: Optional[Dict[str, Any]] = None
 
 
 class AIFertilizerDose(BaseModel):
@@ -2379,6 +2488,7 @@ class AIProfileResult(BaseModel):
     micro_cost_per_ha: float = 0
     coverage: Dict[str, float]
     notes: str = ""
+    traceability: Optional[Dict[str, Any]] = None
 
 
 class AIAcidRecommendation(BaseModel):
@@ -2420,13 +2530,13 @@ async def ai_optimize_fertigation(
     db: Session = Depends(get_db)
 ):
     """
-    AI-powered fertilization optimization using GPT-4.
-    
+    Deterministic fertilization optimization.
+
     Generates 3 fertilization profiles (Economic, Balanced, Complete) based on:
     - Nutrient deficits to cover
     - Available fertilizers from user's catalog
     - Drip irrigation compatibility
-    
+
     Returns fertilizer recommendations with doses in kg/ha.
     """
     usage_service = UsageLimitService(db)
@@ -2438,7 +2548,6 @@ async def ai_optimize_fertigation(
         )
     
     from app.services.fertiirrigation_ai_optimizer import (
-        optimize_with_ai,
         optimize_deterministic,
         get_available_fertilizers_for_user
     )
@@ -2496,7 +2605,8 @@ async def ai_optimize_fertigation(
                 agronomic_context=agronomic_context,
                 water_volume_m3_ha=request.water_volume_m3_ha,
                 area_ha=request.area_ha,
-                user_acid_prices=request.user_acid_prices
+                user_acid_prices=request.user_acid_prices,
+                traceability_context=request.traceability
             )
         
         if not result.get("success"):
@@ -2561,7 +2671,8 @@ async def ai_optimize_fertigation(
                 macro_cost_per_ha=round(macro_cost, 2),
                 micro_cost_per_ha=round(micro_cost, 2),
                 coverage=profile_data.get("coverage", {}),
-                notes=profile_data.get("notes", "")
+                notes=profile_data.get("notes", ""),
+                traceability=profile_data.get("traceability")
             )
         
         usage_service.increment_usage(current_user, 'irrigation')

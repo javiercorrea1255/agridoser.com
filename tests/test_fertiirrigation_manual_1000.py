@@ -7,7 +7,9 @@ import random
 import json
 import sys
 import os
-import httpx
+import pytest
+
+httpx = pytest.importorskip("httpx")
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
