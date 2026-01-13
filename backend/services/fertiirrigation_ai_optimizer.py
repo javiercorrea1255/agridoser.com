@@ -2917,6 +2917,10 @@ def get_available_fertilizers_for_user(db, user_id: int, currency: str = "MXN") 
         _HYDRO_FERTILIZERS_CACHE = _load_hydro_fertilizers_catalog()
     
     hydro_by_id = {f['id']: f for f in _HYDRO_FERTILIZERS_CACHE}
+
+    if not visible_ids:
+        visible_ids = set(hydro_by_id.keys())
+        logger.warning("[Fallback] visible_ids vacío, usando catálogo hydro completo")
     
     user_prices = db.query(UserFertilizerPrice).filter(
         UserFertilizerPrice.user_id == user_id,
