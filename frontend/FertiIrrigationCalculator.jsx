@@ -4790,6 +4790,12 @@ export default function FertiIrrigationCalculator() {
     const fertSource = macroFerts;
     const acidData = currentProfile?.acid_treatment || r.acid_treatment;
 
+    const irrigationFrequencyDays = irrigationSuggestion?.frequency_days || formData.irrigation_frequency_days;
+    const irrigationVolumeM3Ha = irrigationSuggestion?.volume_m3_ha || formData.irrigation_volume_m3_ha;
+    const irrigationApplications = stageDurationDays && irrigationFrequencyDays
+      ? Math.ceil(stageDurationDays / irrigationFrequencyDays)
+      : (irrigationSuggestion?.num_applications || numApplications);
+
     const fertPerApp = fertSource.map(f => ({
       name: f.fertilizer_name || f.name,
       dose: ((f.dose_kg_ha || f.total_dose || 0) / numApplications).toFixed(2)
@@ -5070,6 +5076,57 @@ export default function FertiIrrigationCalculator() {
                 {numApplications}
               </div>
               <div style={{ fontSize: '0.75rem', color: '#1e40af' }}>riegos programados</div>
+            </div>
+          </div>
+        </div>
+
+        {/* ===== IRRIGATION RESULTS ===== */}
+        <div style={{ marginBottom: '28px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
+            <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: 'linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Droplets size={18} color="white" />
+            </div>
+            <div>
+              <h3 style={{ fontSize: '1.1rem', fontWeight: '700', color: '#1e3a5f', margin: 0 }}>
+                Resultados de Riego
+              </h3>
+              <p style={{ fontSize: '0.8rem', color: '#64748b', margin: 0 }}>
+                Recomendación y parámetros para la etapa seleccionada
+              </p>
+            </div>
+          </div>
+          <div className="wizard-panel" style={{ marginBottom: '0' }}>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)',
+              gap: '12px'
+            }}>
+              <div style={{ padding: '12px', borderRadius: '12px', background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                <div style={{ fontSize: '0.75rem', color: '#1e40af', fontWeight: 600, marginBottom: '6px' }}>Frecuencia de riego</div>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700, color: '#1e3a5f' }}>
+                  {irrigationFrequencyDays ? `${irrigationFrequencyDays} días` : '—'}
+                </div>
+              </div>
+              <div style={{ padding: '12px', borderRadius: '12px', background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                <div style={{ fontSize: '0.75rem', color: '#1e40af', fontWeight: 600, marginBottom: '6px' }}>Volumen por riego</div>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700, color: '#1e3a5f' }}>
+                  {irrigationVolumeM3Ha ? `${irrigationVolumeM3Ha} m³/ha` : '—'}
+                </div>
+              </div>
+              <div style={{ padding: '12px', borderRadius: '12px', background: '#eff6ff', border: '1px solid #bfdbfe' }}>
+                <div style={{ fontSize: '0.75rem', color: '#1e40af', fontWeight: 600, marginBottom: '6px' }}>Riegos recomendados</div>
+                <div style={{ fontSize: '1.2rem', fontWeight: 700, color: '#1e3a5f' }}>
+                  {irrigationApplications || '—'}
+                </div>
+                {stageDurationDays && irrigationFrequencyDays && (
+                  <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: '4px' }}>
+                    ({stageDurationDays} días ÷ {irrigationFrequencyDays} días)
+                  </div>
+                )}
+              </div>
+            </div>
+            <div style={{ marginTop: '12px', fontSize: '0.8rem', color: '#475569' }}>
+              Duración de etapa: <strong>{stageDurationDays ? `${stageDurationDays} días` : 'No definida'}</strong>
             </div>
           </div>
         </div>
